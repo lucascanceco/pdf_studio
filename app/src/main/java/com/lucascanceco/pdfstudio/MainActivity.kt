@@ -351,7 +351,7 @@ private fun HomeScreen(recent: List<String>, open: () -> Unit, action: (Tool) ->
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ToolCard("Crear PDF", Icons.Default.AddPhotoAlternate, Pastels[0], Modifier.weight(1f)) { action(Tool.IMAGES) }
                     ToolCard("Unir PDF", Icons.Default.FileCopy, Pastels[1], Modifier.weight(1f)) { action(Tool.MERGE) }
-                    ToolCard("Editar", Icons.Default.Edit, Pastels[2], Modifier.weight(1f), enabled = false) {}
+                    ToolCard("Editar", Icons.Default.Edit, Pastels[2], Modifier.weight(1f)) { action(Tool.TEXT) }
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -360,7 +360,7 @@ private fun HomeScreen(recent: List<String>, open: () -> Unit, action: (Tool) ->
                     ToolCard("OCR", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f), enabled = false) {}
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("Para extraer o rotar páginas, primero abrí un PDF. Las herramientas en gris llegarán en próximas versiones.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                Text("Para editar, extraer, rotar u organizar páginas, abrí un PDF. Las herramientas en gris se habilitan desde el visor o llegarán en próximas versiones.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
             }
         }
         item { Text("Documentos recientes", Modifier.padding(start = 22.dp, top = 8.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
