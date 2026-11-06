@@ -432,8 +432,8 @@ private fun BatchEditor(
         first = null; last = null
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = Back) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = Back) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -462,7 +462,18 @@ private fun BatchEditor(
                         }
                     }
                 }
-                Text(if (mode == PdfOperations.EditKind.TEXT) "Tocá la página, escribí y pulsá Añadir. Podés repetirlo." else "Arrastrá para marcar. Pulsá Añadir para dejar la marca visible.", style = MaterialTheme.typography.labelSmall)
+                if (mode == PdfOperations.EditKind.TEXT) {
+                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), maxLines = 2, singleLine = true)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
+                        Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex) }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
+                }
+                Text(if (mode == PdfOperations.EditKind.TEXT) "Tocá el lugar del PDF y pulsá Aplicar cambio. Repetí las veces que necesites." else "Arrastrá para seleccionar la zona y pulsá Aplicar cambio.", style = MaterialTheme.typography.labelSmall)
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                     val image = bitmap
                     if (image == null) {
@@ -531,17 +542,6 @@ private fun BatchEditor(
                             }
                         }
                     }
-                }
-                if (mode == PdfOperations.EditKind.TEXT) {
-                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
-                        Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
-                    }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex) }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
-                    Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()), modifier = Modifier.weight(1f)) { Text("Añadir a página") }
                 }
             }
         }
