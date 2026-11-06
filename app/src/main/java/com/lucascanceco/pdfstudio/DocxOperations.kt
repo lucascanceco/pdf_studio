@@ -34,6 +34,7 @@ class DocxOperations(private val context: Context) {
             while (entry != null) {
                 if (entry.name == "word/document.xml") {
                     val parser = XmlPullParserFactory.newInstance().newPullParser()
+                    parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
                     parser.setInput(zip, "UTF-8")
                     var inText = false
                     var paragraph: StringBuilder? = null
