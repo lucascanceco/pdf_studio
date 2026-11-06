@@ -252,13 +252,13 @@ private fun PdfStudioApp(initialUri: Uri?) {
         if (selectedImage != null && current != null) {
             val source = current!!
             val imagePage = page
-            ImagePlacementEditor(source, imagePage, selectedImage,
-                onDismiss = { imageToPlace = null; selectedImage.recycle() },
-                onApply = { x, y, width ->
+            ImagePlacementEditor(source, imagePage, count, selectedImage,
+                onDismiss = { imageToPlace = null },
+                onSave = { stamps ->
                     imageToPlace = null
                     perform {
-                        try { ops.stampImage(source, imagePage, selectedImage, x, y, width) }
-                        finally { selectedImage.recycle() }
+                        try { ops.stampImages(source, stamps) }
+                        finally { stamps.forEach { it.bitmap.recycle() } }
                     }
                 }
             )
@@ -579,36 +579,87 @@ private fun BatchEditor(
 @Composable
 private fun ImagePlacementEditor(
     uri: Uri,
-    page: Int,
-    stamp: android.graphics.Bitmap,
+    initialPage: Int,
+    pageCount: Int,
+    firstImage: android.graphics.Bitmap,
     onDismiss: () -> Unit,
-    onApply: (Float, Float, Float) -> Unit
+    onSave: (List<PdfOperations.ImageStamp>) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val operations = remember { PdfOperations(context) }
+    val stamps = remember { mutableStateListOf<PdfOperations.ImageStamp>() }
+    var stamp by remember { mutableStateOf<android.graphics.Bitmap?>(firstImage) }
+    var page by remember { mutableIntStateOf(initialPage) }
     var background by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var x by remember { mutableFloatStateOf(.12f) }
     var y by remember { mutableFloatStateOf(.20f) }
     var width by remember { mutableFloatStateOf(.45f) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { chosen ->
+        if (chosen != null) {
+            val bitmap = try { context.contentResolver.openInputStream(chosen).use { android.graphics.BitmapFactory.decodeStream(it) } }
+            catch (_: Exception) { null }
+            if (bitmap != null) {
+                stamp?.recycle()
+                stamp = bitmap
+                x = .12f; y = .20f; width = .45f
+            }
+        }
+    }
+    fun closeWithoutSaving() {
+        stamp?.recycle()
+        stamps.forEach { it.bitmap.recycle() }
+        onDismiss()
+    }
+    fun applyImage() {
+        val image = stamp ?: return
+        stamps.add(PdfOperations.ImageStamp(page, image, x, y, width))
+        stamp = null
+    }
     LaunchedEffect(uri, page) {
         background = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { null }
     }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
+    Dialog(onDismissRequest = ::closeWithoutSaving, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
         Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
-                    Text("Colocar imagen · Página ${page + 1}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    IconButton(onClick = ::closeWithoutSaving) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
+                    Column(Modifier.weight(1f)) {
+                        Text("Editar imágenes", fontWeight = FontWeight.Bold)
+                        Text("${stamps.size} imágenes aplicadas", style = MaterialTheme.typography.labelSmall, color = Purple)
+                    }
+                    TextButton(onClick = {
+                        stamp?.recycle()
+                        stamp = null
+                        onSave(stamps.toList())
+                    }, enabled = stamps.isNotEmpty()) { Text("Guardar PDF") }
                 }
-                Text("Arrastrá la imagen para moverla y ajustá su tamaño. Se verá antes de guardar.", style = MaterialTheme.typography.bodySmall)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Tamaño ${(width * 100).toInt()}%", modifier = Modifier.width(105.dp))
-                    Slider(width, {
-                        width = it
-                        x = x.coerceIn(0f, (1f - width).coerceAtLeast(0f))
-                    }, valueRange = .08f..1f, modifier = Modifier.weight(1f))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { page-- }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Anterior") }
+                    Text("Página ${page + 1} de $pageCount")
+                    IconButton(onClick = { page++ }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Siguiente") }
                 }
-                Button(onClick = { onApply(x, y, width) }, modifier = Modifier.fillMaxWidth()) { Text("Aplicar imagen y guardar PDF") }
+                if (stamp != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Tamaño ${(width * 100).toInt()}%", modifier = Modifier.width(105.dp))
+                        Slider(width, {
+                            width = it
+                            x = x.coerceIn(0f, (1f - width).coerceAtLeast(0f))
+                        }, valueRange = .08f..1f, modifier = Modifier.weight(1f))
+                    }
+                } else {
+                    Text("La imagen quedó aplicada. Podés sumar otra o guardar todas juntas.", style = MaterialTheme.typography.bodySmall)
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { picker.launch("image/*") }, modifier = Modifier.weight(1f)) { Text("Elegir otra") }
+                    Button(onClick = ::applyImage, enabled = stamp != null, modifier = Modifier.weight(1f)) { Text("Aplicar imagen") }
+                }
+                if (stamps.isNotEmpty()) {
+                    TextButton(onClick = {
+                        val removed = stamps.removeAt(stamps.lastIndex)
+                        removed.bitmap.recycle()
+                    }) { Text("Deshacer última imagen") }
+                }
+                Text("Arrastrá la imagen para ubicarla y mirá el resultado antes de aplicar.", style = MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.height(8.dp))
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                     val pdf = background
@@ -619,25 +670,34 @@ private fun ImagePlacementEditor(
                         val drawHeight = drawWidth / ratio
                         Box(Modifier.size(drawWidth, drawHeight)) {
                             Image(pdf.asImageBitmap(), "PDF", Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
-                            Canvas(Modifier.fillMaxSize().pointerInput(page, stamp, width) {
+                            val gestures = if (stamp != null) Modifier.pointerInput(page, stamp, width) {
                                 detectDragGestures(onDragStart = { position ->
-                                    val heightFraction = width * stamp.height.toFloat() / stamp.width * size.width / size.height
-                                    x = (position.x / size.width - width / 2f).coerceIn(0f, (1f - width).coerceAtLeast(0f))
-                                    y = (position.y / size.height - heightFraction / 2f).coerceIn(0f, (1f - heightFraction).coerceAtLeast(0f))
+                                    stamp?.let { active ->
+                                        val heightFraction = width * active.height.toFloat() / active.width * size.width / size.height
+                                        x = (position.x / size.width - width / 2f).coerceIn(0f, (1f - width).coerceAtLeast(0f))
+                                        y = (position.y / size.height - heightFraction / 2f).coerceIn(0f, (1f - heightFraction).coerceAtLeast(0f))
+                                    }
                                 }) { change, drag ->
-                                    val heightFraction = width * stamp.height.toFloat() / stamp.width * size.width / size.height
-                                    x = (x + drag.x / size.width).coerceIn(0f, (1f - width).coerceAtLeast(0f))
-                                    y = (y + drag.y / size.height).coerceIn(0f, (1f - heightFraction).coerceAtLeast(0f))
-                                    change.consume()
+                                    stamp?.let { active ->
+                                        val heightFraction = width * active.height.toFloat() / active.width * size.width / size.height
+                                        x = (x + drag.x / size.width).coerceIn(0f, (1f - width).coerceAtLeast(0f))
+                                        y = (y + drag.y / size.height).coerceIn(0f, (1f - heightFraction).coerceAtLeast(0f))
+                                        change.consume()
+                                    }
                                 }
-                            }) {
-                                val targetWidth = size.width * width
-                                val targetHeight = targetWidth * stamp.height / stamp.width
-                                val left = x * size.width
-                                val top = y * size.height
-                                val target = android.graphics.RectF(left, top, left + targetWidth, top + targetHeight)
-                                drawContext.canvas.nativeCanvas.drawBitmap(stamp, null, target, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
-                                drawRect(Purple, Offset(left, top), androidx.compose.ui.geometry.Size(targetWidth, targetHeight), style = Stroke(width = 2.dp.toPx()))
+                            } else Modifier
+                            Canvas(Modifier.fillMaxSize().then(gestures)) {
+                                fun drawStamp(image: android.graphics.Bitmap, leftFraction: Float, topFraction: Float, widthFraction: Float, selected: Boolean) {
+                                    val targetWidth = size.width * widthFraction
+                                    val targetHeight = targetWidth * image.height / image.width
+                                    val left = leftFraction * size.width
+                                    val top = topFraction * size.height
+                                    val target = android.graphics.RectF(left, top, left + targetWidth, top + targetHeight)
+                                    drawContext.canvas.nativeCanvas.drawBitmap(image, null, target, android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
+                                    if (selected) drawRect(Purple, Offset(left, top), androidx.compose.ui.geometry.Size(targetWidth, targetHeight), style = Stroke(width = 2.dp.toPx()))
+                                }
+                                stamps.filter { it.pageIndex == page }.forEach { drawStamp(it.bitmap, it.x, it.y, it.width, false) }
+                                stamp?.let { drawStamp(it, x, y, width, true) }
                             }
                         }
                     }
