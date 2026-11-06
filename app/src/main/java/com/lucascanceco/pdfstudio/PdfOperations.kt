@@ -172,7 +172,7 @@ class PdfOperations(private val context: Context) {
 
     enum class Markup { HIGHLIGHT, UNDERLINE, STRIKEOUT }
 
-    enum class EditKind { TEXT, HIGHLIGHT, UNDERLINE, STRIKEOUT }
+    enum class EditKind { TEXT, IMAGE, HIGHLIGHT, UNDERLINE, STRIKEOUT }
 
     /** Coordinates are normalized to each PDF page and remain stable if the keyboard resizes the UI. */
     data class EditOperation(
@@ -183,7 +183,8 @@ class PdfOperations(private val context: Context) {
         val width: Float = 0f,
         val height: Float = 0f,
         val text: String = "",
-        val fontSize: Float = 16f
+        val fontSize: Float = 16f,
+        val image: Bitmap? = null
     )
 
     /** Transactional multi-page editing: writes all staged changes into one new PDF. */
@@ -211,6 +212,12 @@ class PdfOperations(private val context: Context) {
                                     stream.showText(safe)
                                     stream.endText()
                                 }
+                            }
+                            EditKind.IMAGE -> {
+                                val bitmap = edit.image ?: error("Falta la imagen de una edición")
+                                val w = box.width * edit.width.coerceIn(.05f, 1f)
+                                val h = w * bitmap.height / bitmap.width
+                                stream.drawImage(LosslessFactory.createFromImage(doc, bitmap), x, top - h, w, h)
                             }
                             else -> {
                                 val w = box.width * edit.width.coerceIn(.005f, 1f)
