@@ -546,7 +546,7 @@ private fun BatchEditor(
                 }
                 Text(when (mode) {
                     PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
-                    PdfOperations.EditKind.IMAGE -> "Tocá la página para ubicar la imagen y pulsá Aplicar cambio."
+                    PdfOperations.EditKind.IMAGE -> "Tocá o arrastrá la imagen para ubicarla y pulsá Aplicar cambio."
                     else -> "Arrastrá para seleccionar la zona y pulsá Aplicar cambio."
                 }, style = MaterialTheme.typography.labelSmall)
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
@@ -557,11 +557,28 @@ private fun BatchEditor(
                         val ratio = image.width.toFloat() / image.height
                         val drawWidth = if (maxWidth / ratio <= maxHeight) maxWidth else maxHeight * ratio
                         val drawHeight = drawWidth / ratio
-                        val gestureModifier = if (mode == PdfOperations.EditKind.TEXT || mode == PdfOperations.EditKind.IMAGE) {
+                        val gestureModifier = if (mode == PdfOperations.EditKind.TEXT) {
                             Modifier.pointerInput(page, mode) {
                                 detectTapGestures { tap ->
                                     first = Offset((tap.x / size.width).coerceIn(0f, 1f), (tap.y / size.height).coerceIn(0f, 1f))
                                     last = null
+                                }
+                            }
+                        } else if (mode == PdfOperations.EditKind.IMAGE) {
+                            Modifier.pointerInput(page, mode, imageWidth) {
+                                detectTapGestures { tap ->
+                                    first = Offset((tap.x / size.width).coerceIn(0f, (1f - imageWidth).coerceAtLeast(0f)), (tap.y / size.height).coerceIn(0f, 1f))
+                                }
+                            }.pointerInput(page, mode, imageWidth) {
+                                detectDragGestures(onDragStart = { start ->
+                                    if (first == null) first = Offset((start.x / size.width).coerceIn(0f, 1f), (start.y / size.height).coerceIn(0f, 1f))
+                                }) { change, drag ->
+                                    val previous = first ?: Offset.Zero
+                                    first = Offset(
+                                        (previous.x + drag.x / size.width).coerceIn(0f, (1f - imageWidth).coerceAtLeast(0f)),
+                                        (previous.y + drag.y / size.height).coerceIn(0f, 1f)
+                                    )
+                                    change.consume()
                                 }
                             }
                         } else {
