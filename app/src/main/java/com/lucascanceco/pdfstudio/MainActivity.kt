@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS }
+private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS, MARKUP }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
@@ -79,6 +79,11 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var searchOpen by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var markupMode by remember { mutableStateOf(PdfOperations.Markup.HIGHLIGHT) }
+    var markupX by remember { mutableFloatStateOf(.12f) }
+    var markupY by remember { mutableFloatStateOf(.30f) }
+    var markupW by remember { mutableFloatStateOf(.60f) }
+    var markupH by remember { mutableFloatStateOf(.03f) }
     var ocrResult by remember { mutableStateOf<String?>(null) }
     val signature = remember { mutableStateListOf<List<Offset>>() }
     var signatureCurrent by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -176,7 +181,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
                     ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onSearch = { searchOpen = true }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onPages = {
                         pageSequence = (1..count).joinToString(",")
                         selectedTool = Tool.PAGES
-                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onCompress = { selectedTool = Tool.COMPRESS }, onSearchable = {
+                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onMarkup = { selectedTool = Tool.MARKUP }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onCompress = { selectedTool = Tool.COMPRESS }, onSearchable = {
                         val chosen = current!!
                         perform { ocr.createSearchableCopy(chosen) }
                     }, onOcr = {
@@ -355,6 +360,34 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Crear copia compacta") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
+        if (selectedTool == Tool.MARKUP && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Marcar página ${page + 1}") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Tipo de marca")
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        PdfOperations.Markup.entries.forEachIndexed { index, value ->
+                            SegmentedButton(selected = markupMode == value, onClick = { markupMode = value }, shape = SegmentedButtonDefaults.itemShape(index = index, count = 3)) {
+                                Text(when (value) { PdfOperations.Markup.HIGHLIGHT -> "Resaltar"; PdfOperations.Markup.UNDERLINE -> "Subrayar"; PdfOperations.Markup.STRIKEOUT -> "Tachar" }, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                    Text("Posición horizontal ${(markupX * 100).toInt()} %")
+                    Slider(markupX, { markupX = it }, valueRange = 0f..0.9f)
+                    Text("Posición vertical ${(markupY * 100).toInt()} %")
+                    Slider(markupY, { markupY = it }, valueRange = .02f..0.95f)
+                    Text("Ancho ${(markupW * 100).toInt()} %")
+                    Slider(markupW, { markupW = it }, valueRange = .05f..0.95f)
+                    Text("Alto ${(markupH * 100).toInt()} %")
+                    Slider(markupH, { markupH = it }, valueRange = .005f..0.12f)
+                }
+            }, confirmButton = { TextButton(onClick = {
+                val chosen = current!!
+                val mark = markupMode
+                val x = markupX; val y = markupY; val w = markupW; val h = markupH
+                perform { ops.markup(chosen, page, x, y, w, h, mark) }
+                selectedTool = null
+            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
     }
 }
 
@@ -421,7 +454,7 @@ private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.Ima
 }
 
 @Composable
-private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onSearch: () -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit, onCompress: () -> Unit, onSearchable: () -> Unit) {
+private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onSearch: () -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onMarkup: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit, onCompress: () -> Unit, onSearchable: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
     var image by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -446,6 +479,7 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
         }
         Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
             TextButton(onClick = onSignature, enabled = !busy) { Icon(Icons.Default.Draw, null); Text("Firma") }
+            TextButton(onClick = onMarkup, enabled = !busy) { Icon(Icons.Default.Highlight, null); Text("Marcar") }
             TextButton(onClick = onOcr, enabled = !busy) { Icon(Icons.Default.DocumentScanner, null); Text("OCR") }
             TextButton(onClick = onWatermark, enabled = !busy) { Icon(Icons.Default.WaterDrop, null); Text("Marca") }
             TextButton(onClick = onProtect, enabled = !busy) { Icon(Icons.Default.Lock, null); Text("Clave") }
