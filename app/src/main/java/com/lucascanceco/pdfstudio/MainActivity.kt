@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS, MARKUP }
+private enum class Tool { IMAGES, DOCUMENT, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS, MARKUP }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
@@ -134,6 +134,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
     val images = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { files ->
         if (files.isNotEmpty()) perform { ops.imagesToPdf(files) }
     }
+    val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val name = uri.lastPathSegment.orEmpty().lowercase()
+            val mime = context.contentResolver.getType(uri).orEmpty()
+            val isDocx = name.endsWith(".docx") || mime.contains("wordprocessingml")
+            perform { ops.documentToPdf(uri, isDocx) }
+        }
+    }
     val stampPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null && current != null) perform {
             val bitmap = context.contentResolver.openInputStream(uri).use { android.graphics.BitmapFactory.decodeStream(it) }
@@ -173,6 +181,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
                         selectedTool = tool
                         when (tool) {
                             Tool.IMAGES -> images.launch(arrayOf("image/*"))
+                            Tool.DOCUMENT -> documentPicker.launch(arrayOf("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
                             Tool.MERGE -> manyPdf.launch(arrayOf("application/pdf"))
                             else -> if (current == null) openPdf.launch(arrayOf("application/pdf"))
                         }
@@ -424,7 +433,7 @@ private fun HomeScreen(recent: List<String>, open: () -> Unit, action: (Tool) ->
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     ToolCard("Extraer", Icons.Default.ContentCut, Pastels[3], Modifier.weight(1f), enabled = false) {}
-                    ToolCard("Rotar", Icons.Default.RotateRight, Pastels[4], Modifier.weight(1f), enabled = false) {}
+                    ToolCard("TXT / Word", Icons.Default.Article, Pastels[4], Modifier.weight(1f)) { action(Tool.DOCUMENT) }
                     ToolCard("OCR", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f), enabled = false) {}
                 }
                 Spacer(Modifier.height(8.dp))
