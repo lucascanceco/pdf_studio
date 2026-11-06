@@ -45,6 +45,6 @@ Usar **copias de archivos de prueba**, nunca originales únicos ni documentos se
 - La conversión DOCX actual extrae el texto, no conserva tablas y diseños complejos.
 - La compresión rasterizada puede aumentar el tamaño de ciertos PDF y pierde contenido interactivo/texto seleccionable.
 - El editor permite reubicar borradores y reeditar el último cambio de la página, pero todavía no cuenta con selección y transformación libre de todos los objetos existentes.
-- El organizador visual mueve miniaturas mediante botones, no mediante arrastrar y soltar.
+- El organizador permite mover páginas con botones o mediante una pulsación larga y arrastre horizontal de una posición por gesto.
 
 Anotar modelo de celular, versión de Android, función, resultado esperado, resultado real y captura si hay un problema.
