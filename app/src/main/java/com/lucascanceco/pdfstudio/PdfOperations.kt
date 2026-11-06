@@ -23,6 +23,10 @@ import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.util.zip.ZipInputStream
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -357,6 +361,93 @@ class PdfOperations(private val context: Context) {
             }
             output
         } catch (e: Exception) { output.delete(); throw e }
+    }
+
+    /** Converts plain UTF-8 text or a DOCX's textual content. Complex Word layout is deliberately not claimed to survive. */
+    suspend fun documentToPdf(uri: Uri, docx: Boolean): File = withContext(Dispatchers.IO) {
+        val text = if (docx) extractDocxText(uri) else context.contentResolver.openInputStream(uri).use {
+            requireNotNull(it) { "Archivo no accesible" }
+            it.bufferedReader(Charsets.UTF_8).use { reader -> reader.readText().take(500_000) }
+        }
+        require(text.isNotBlank()) { "No se encontró texto en el documento" }
+        val output = File.createTempFile("pdfstudio_document_", ".pdf", context.cacheDir)
+        try {
+            PDDocument().use { doc ->
+                val font = PDType1Font.HELVETICA
+                val fontSize = 11f
+                val leading = 16f
+                val margin = 46f
+                var page = PDPage(PDRectangle.A4)
+                doc.addPage(page)
+                var stream = PDPageContentStream(doc, page)
+                var y = page.mediaBox.height - margin
+                try {
+                    for (line in text.lines()) {
+                        val safe = line.map { if (it.code in 32..126 || it.code in 160..255) it else ' ' }.joinToString("")
+                        val words = safe.split(' ')
+                        val wrapped = mutableListOf<String>()
+                        var currentLine = ""
+                        for (word in words) {
+                            val candidate = if (currentLine.isEmpty()) word else "$currentLine $word"
+                            if (candidate.length > 95 && currentLine.isNotEmpty()) {
+                                wrapped.add(currentLine)
+                                currentLine = word
+                            } else currentLine = candidate
+                        }
+                        wrapped.add(currentLine)
+                        for (segment in wrapped) {
+                            if (y < margin + leading) {
+                                stream.close()
+                                page = PDPage(PDRectangle.A4)
+                                doc.addPage(page)
+                                stream = PDPageContentStream(doc, page)
+                                y = page.mediaBox.height - margin
+                            }
+                            if (segment.isNotBlank()) {
+                                stream.beginText()
+                                stream.setFont(font, fontSize)
+                                stream.newLineAtOffset(margin, y)
+                                stream.showText(segment.take(180))
+                                stream.endText()
+                            }
+                            y -= leading
+                        }
+                    }
+                } finally { stream.close() }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+    }
+
+    private fun extractDocxText(uri: Uri): String {
+        val result = StringBuilder()
+        val input = context.contentResolver.openInputStream(uri) ?: error("Archivo no accesible")
+        ZipInputStream(input).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (entry.name == "word/document.xml") {
+                    val parser = XmlPullParserFactory.newInstance().newPullParser()
+                    parser.setInput(zip, "UTF-8")
+                    var inText = false
+                    while (parser.eventType != XmlPullParser.END_DOCUMENT && result.length < 500_000) {
+                        when (parser.eventType) {
+                            XmlPullParser.START_TAG -> if (parser.name == "t") inText = true
+                            XmlPullParser.TEXT -> if (inText) result.append(parser.text)
+                            XmlPullParser.END_TAG -> when (parser.name) {
+                                "t" -> inText = false
+                                "p" -> result.append('\n')
+                            }
+                        }
+                        parser.next()
+                    }
+                    break
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+        return result.toString()
     }
 
     suspend fun export(temp: File, destination: Uri) = withContext(Dispatchers.IO) {
