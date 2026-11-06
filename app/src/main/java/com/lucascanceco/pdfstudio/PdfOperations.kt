@@ -19,6 +19,7 @@ import com.tom_roush.pdfbox.pdmodel.PDPageContentStream.AppendMode
 import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode
+import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
@@ -157,6 +158,48 @@ class PdfOperations(private val context: Context) {
                     stream.newLineAtOffset(x, y)
                     stream.showText(safeText)
                     stream.endText()
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    enum class Markup { HIGHLIGHT, UNDERLINE, STRIKEOUT }
+
+    /** Draws an annotation visually over an area chosen by the user. Does not delete original text. */
+    suspend fun markup(uri: Uri, pageIndex: Int, xFraction: Float, yFraction: Float, widthFraction: Float, heightFraction: Float, type: Markup): File = withContext(Dispatchers.IO) {
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_markup_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                val page = doc.getPage(pageIndex)
+                val box = page.cropBox ?: page.mediaBox
+                val x = box.lowerLeftX + box.width * xFraction.coerceIn(0f, 1f)
+                val top = box.lowerLeftY + box.height * (1f - yFraction.coerceIn(0f, 1f))
+                val w = box.width * widthFraction.coerceIn(.02f, 1f)
+                val h = box.height * heightFraction.coerceIn(.005f, .3f)
+                PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                    stream.saveGraphicsState()
+                    when (type) {
+                        Markup.HIGHLIGHT -> {
+                            val gs = PDExtendedGraphicsState()
+                            gs.nonStrokingAlphaConstant = .3f
+                            stream.setGraphicsStateParameters(gs)
+                            stream.setNonStrokingColor(255, 211, 45)
+                            stream.addRect(x, top - h, w, h)
+                            stream.fill()
+                        }
+                        Markup.UNDERLINE, Markup.STRIKEOUT -> {
+                            stream.setStrokingColor(230, 78, 105)
+                            stream.setLineWidth(1.5f)
+                            stream.moveTo(x, if (type == Markup.UNDERLINE) top - h else top - h / 2f)
+                            stream.lineTo(x + w, if (type == Markup.UNDERLINE) top - h else top - h / 2f)
+                            stream.stroke()
+                        }
+                    }
+                    stream.restoreGraphicsState()
                 }
                 doc.save(output)
             }
