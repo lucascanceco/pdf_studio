@@ -12,10 +12,11 @@ android {
         applicationId = "com.lucascanceco.pdfstudio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-beta"
+        versionCode = 4
+        versionName = "0.4.0-beta"
+        buildConfigField("String", "BUILD_COMMIT", "\"${System.getenv("GITHUB_SHA")?.take(8) ?: "local"}\"")
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
