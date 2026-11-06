@@ -13,12 +13,25 @@ class EditorDraftStore(private val context: Context) {
     private val folder = File(context.filesDir, "editor_draft")
     private val manifest = File(folder, "draft.json")
 
+    data class Pending(
+        val mode: PdfOperations.EditKind,
+        val text: String = "",
+        val x: Float? = null,
+        val y: Float? = null,
+        val lastX: Float? = null,
+        val lastY: Float? = null,
+        val fontSize: Float = 16f,
+        val imageWidth: Float = .45f,
+        val image: Bitmap? = null
+    )
+
     data class Draft(
         val document: Uri,
         val documentName: String,
         val page: Int,
         val modifiedAt: Long,
-        val edits: List<PdfOperations.EditOperation>
+        val edits: List<PdfOperations.EditOperation>,
+        val pending: Pending? = null
     )
 
     fun metadata(): Draft? = load(withImages = false)
@@ -47,12 +60,27 @@ class EditorDraftStore(private val context: Context) {
                 ))
             }
         }
+        val pending = root.optJSONObject("pending")?.let { item ->
+            val image = if (withImages && item.has("image"))
+                BitmapFactory.decodeFile(File(folder, item.getString("image")).absolutePath) else null
+            Pending(
+                mode = PdfOperations.EditKind.valueOf(item.getString("mode")),
+                text = item.optString("text", ""),
+                x = item.optDouble("x", Double.NaN).takeUnless(Double::isNaN)?.toFloat(),
+                y = item.optDouble("y", Double.NaN).takeUnless(Double::isNaN)?.toFloat(),
+                lastX = item.optDouble("lastX", Double.NaN).takeUnless(Double::isNaN)?.toFloat(),
+                lastY = item.optDouble("lastY", Double.NaN).takeUnless(Double::isNaN)?.toFloat(),
+                fontSize = item.optDouble("fontSize", 16.0).toFloat(),
+                imageWidth = item.optDouble("imageWidth", .45).toFloat(),
+                image = image
+            )
+        }
         Draft(Uri.parse(root.getString("uri")), root.optString("name", "Documento PDF"),
-            root.optInt("page", 0), root.getLong("timestamp"), edits)
+            root.optInt("page", 0), root.getLong("timestamp"), edits, pending)
       } catch (_: Exception) { null }
     }
 
-    fun save(document: Uri, name: String, page: Int, edits: List<PdfOperations.EditOperation>) {
+    fun save(document: Uri, name: String, page: Int, edits: List<PdfOperations.EditOperation>, pending: Pending?) {
         folder.mkdirs()
         folder.listFiles()?.filter { it.name.startsWith("image_") }?.forEach { it.delete() }
         val rows = JSONArray()
@@ -80,6 +108,21 @@ class EditorDraftStore(private val context: Context) {
             put("page", page)
             put("timestamp", System.currentTimeMillis())
             put("edits", rows)
+            pending?.let { active ->
+                val item = JSONObject().apply {
+                    put("mode", active.mode.name); put("text", active.text)
+                    active.x?.let { put("x", it.toDouble()) }
+                    active.y?.let { put("y", it.toDouble()) }
+                    active.lastX?.let { put("lastX", it.toDouble()) }
+                    active.lastY?.let { put("lastY", it.toDouble()) }
+                    put("fontSize", active.fontSize.toDouble()); put("imageWidth", active.imageWidth.toDouble())
+                }
+                active.image?.let { bitmap ->
+                    File(folder, "pending.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    item.put("image", "pending.png")
+                }
+                put("pending", item)
+            }
         }
         val staging = File(folder, "draft.json.tmp")
         staging.writeText(root.toString())
