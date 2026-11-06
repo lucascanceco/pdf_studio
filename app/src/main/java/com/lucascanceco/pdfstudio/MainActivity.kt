@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, DOCUMENT, MERGE, EXTRACT, ROTATE, TEXT, ORIGINAL, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS, MARKUP }
+private enum class Tool { IMAGES, DOCUMENT, MERGE, EXTRACT, ROTATE, TEXT, ORIGINAL, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS, PREPARE, MARKUP }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
@@ -115,7 +115,16 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var pending by remember { mutableStateOf<File?>(null) }
     var pendingEditBatch by remember { mutableStateOf<List<PdfOperations.EditOperation>?>(null) }
     var pendingOperation by remember { mutableStateOf("copia") }
+    var pendingSourceName by remember { mutableStateOf<String?>(null) }
     var lastSavedUri by remember { mutableStateOf<Uri?>(null) }
+    var preparedSend by remember { mutableStateOf<Pair<File, Long>?>(null) }
+    var sendLimit by remember { mutableStateOf("5") }
+    var wordPreview by remember { mutableStateOf<DocxOperations.Conversion?>(null) }
+    var wordSource by remember { mutableStateOf<Uri?>(null) }
+    var wordIssue by remember { mutableStateOf<String?>(null) }
+    val mergeSelection = remember { mutableStateListOf<Uri>() }
+    val photoSelection = remember { mutableStateListOf<Uri>() }
+    var deliveryPattern by remember { mutableStateOf("Fotos") }
     var imageToPlace by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var busy by remember { mutableStateOf(false) }
     var recent by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -137,6 +146,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var markupW by remember { mutableFloatStateOf(.60f) }
     var markupH by remember { mutableFloatStateOf(.03f) }
     var ocrResult by remember { mutableStateOf<String?>(null) }
+    var ocrChooser by remember { mutableStateOf(false) }
     val signature = remember { mutableStateListOf<List<Offset>>() }
     var signatureCurrent by remember { mutableStateOf<List<Offset>>(emptyList()) }
 
@@ -148,6 +158,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
     LaunchedEffect(Unit) {
         recent = context.getSharedPreferences("recent", 0).getString("uris", "")!!.lines().filter { it.isNotBlank() }
         availableDraft = draftStore.metadata()
+        deliveryPattern = context.getSharedPreferences("delivery", 0).getString("pattern", "Fotos") ?: "Fotos"
     }
     LaunchedEffect(current) {
         val uri = current ?: return@LaunchedEffect
@@ -160,12 +171,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
             rememberUri(uri)
             if (selectedTool == Tool.OCR) {
                 selectedTool = null
-                ocrResult = try {
-                    ocr.recognize(uri, 0).ifBlank { "No se reconoció texto en la primera página." }
-                } catch (e: Exception) {
-                    snackbar.showSnackbar("No se pudo reconocer texto: ${e.message ?: "Error de OCR"}")
-                    null
-                }
+                ocrChooser = true
             }
         } catch (e: Exception) {
             current = null
@@ -199,17 +205,27 @@ private fun PdfStudioApp(initialUri: Uri?) {
         } else if (current == null) selectedTool = null
     }
     val manyPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { files ->
-        if (files.isNotEmpty()) perform { ops.merge(files) }
+        if (files.size >= 2) {
+            mergeSelection.clear(); mergeSelection.addAll(files)
+        } else if (files.size == 1) scope.launch { snackbar.showSnackbar("Elegí al menos dos archivos para unir") }
     }
     val images = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { files ->
-        if (files.isNotEmpty()) perform { ops.imagesToPdf(files) }
+        if (files.isNotEmpty()) { photoSelection.clear(); photoSelection.addAll(files) }
     }
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val name = uri.lastPathSegment.orEmpty().lowercase()
             val mime = context.contentResolver.getType(uri).orEmpty()
             val isDocx = name.endsWith(".docx") || mime.contains("wordprocessingml")
-            perform { ops.documentToPdf(uri, isDocx) }
+            pendingSourceName = fileNameFor(context, uri)
+            if (isDocx) scope.launch {
+                busy = true
+                wordSource = uri
+                try { wordPreview = DocxOperations(context).convert(uri); wordIssue = null }
+                catch (e: Exception) { wordIssue = e.message ?: "Maquetación no compatible" }
+                finally { busy = false }
+            }
+            else perform("texto") { ops.documentToPdf(uri, false) }
         }
     }
     val stampPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -244,7 +260,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
         }
     }
     LaunchedEffect(pending) {
-        if (pending != null) save.launch(suggestedCopyName(current?.let { fileNameFor(context, it) } ?: "PDFStudio", pendingOperation))
+        if (pending != null) save.launch(suggestedCopyName(pendingSourceName ?: current?.let { fileNameFor(context, it) } ?: "PDFStudio", pendingOperation))
     }
 
     val scheme = lightColorScheme(primary = Purple, background = Back, surface = Color.White, onSurface = Ink)
@@ -261,7 +277,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad).background(Back)) {
                 if (current == null) {
-                    HomeScreen(recent, availableDraft, { openPdf.launch(arrayOf("application/pdf")) }, { tool ->
+                    HomeScreen(recent, availableDraft, deliveryPattern, { openPdf.launch(arrayOf("application/pdf")) }, { tool ->
                         selectedTool = tool
                         when (tool) {
                             Tool.IMAGES -> images.launch(arrayOf("image/*"))
@@ -277,22 +293,15 @@ private fun PdfStudioApp(initialUri: Uri?) {
                             selectedTool = Tool.TEXT
                             current = restored.document
                         }
-                    })
+                    }, { images.launch(arrayOf("image/*")) })
                 } else {
                     ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onSearch = { searchOpen = true }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform("rotado") { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onOriginal = { selectedTool = Tool.ORIGINAL }, onPages = {
                         pageSequence = (1..count).joinToString(",")
                         selectedTool = Tool.PAGES
-                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onMarkup = { selectedTool = Tool.MARKUP }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onCompress = { selectedTool = Tool.COMPRESS }, onSearchable = {
+                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onMarkup = { selectedTool = Tool.MARKUP }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onCompress = { selectedTool = Tool.COMPRESS }, onPrepare = { selectedTool = Tool.PREPARE }, onSearchable = {
                         val chosen = current!!
                         perform { ocr.createSearchableCopy(chosen) }
-                    }, onOcr = {
-                        scope.launch {
-                            busy = true
-                            try { ocrResult = ocr.recognize(current!!, page).ifBlank { "No se reconoció texto en esta página." } }
-                            catch (e: Exception) { snackbar.showSnackbar("No se pudo reconocer texto: ${e.message}") }
-                            finally { busy = false }
-                        }
-                    })
+                    }, onOcr = { ocrChooser = true })
                 }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
             }
@@ -310,6 +319,24 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 else scope.launch { snackbar.showSnackbar("Rango inválido") }
                 selectedTool = null
             }) { Text("Extraer") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
+        if (mergeSelection.isNotEmpty()) {
+            MergePreview(mergeSelection.toList(), onDismiss = { mergeSelection.clear() }, onMerge = { ordered ->
+                pendingSourceName = fileNameFor(context, ordered.first())
+                perform("unido") { ops.merge(ordered) }
+                mergeSelection.clear()
+            })
+        }
+        if (photoSelection.isNotEmpty()) {
+            PhotoOrderPreview(photoSelection.toList(), deliveryPattern,
+                onDismiss = { photoSelection.clear() },
+                onCreate = { ordered, pattern ->
+                    deliveryPattern = pattern
+                    context.getSharedPreferences("delivery", 0).edit().putString("pattern", pattern).apply()
+                    pendingSourceName = pattern
+                    perform("entrega") { ops.imagesToPdf(ordered) }
+                    photoSelection.clear()
+                })
         }
         if ((selectedTool == Tool.TEXT || selectedTool == Tool.MARKUP || imageToPlace != null) && current != null) {
             val source = current!!
@@ -388,6 +415,19 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 clipboard.setPrimaryClip(android.content.ClipData.newPlainText("OCR PDF Studio", ocrResult))
                 ocrResult = null
             }) { Text("Copiar") } }, dismissButton = { TextButton(onClick = { ocrResult = null }) { Text("Cerrar") } })
+        }
+        if (ocrChooser && current != null) {
+            val source = current!!
+            OcrPageChooser(source, count, page, onDismiss = { ocrChooser = false }, onConfirm = { chosenPage ->
+                page = chosenPage
+                ocrChooser = false
+                scope.launch {
+                    busy = true
+                    try { ocrResult = ocr.recognize(source, chosenPage).ifBlank { "No se reconoció texto en esta página." } }
+                    catch (e: Exception) { snackbar.showSnackbar("No se pudo reconocer texto: ${e.message}") }
+                    finally { busy = false }
+                }
+            })
         }
         if (selectedTool == Tool.SIGNATURE && current != null) {
             AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Firmar página ${page + 1}") }, text = {
@@ -490,6 +530,78 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Crear copia compacta") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
+        if (selectedTool == Tool.PREPARE && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Preparar para enviar") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Elegí el tamaño máximo. Esta compresión rasteriza las páginas: se pierden enlaces, formularios y texto seleccionable. El original permanece intacto.")
+                    OutlinedTextField(sendLimit, { sendLimit = it.filter(Char::isDigit).take(3) }, label = { Text("Límite en MB (ej.: 5)") }, singleLine = true)
+                } },
+                confirmButton = { TextButton(onClick = {
+                    val limit = sendLimit.toLongOrNull()?.takeIf { it in 1..100 }
+                    if (limit == null) scope.launch { snackbar.showSnackbar("Elegí un límite entre 1 y 100 MB") }
+                    else {
+                        val source = current!!
+                        selectedTool = null
+                        scope.launch {
+                            busy = true
+                            try {
+                                var result = ops.compressRasterized(source, .65f)
+                                if (result.length() > limit * 1024L * 1024L) {
+                                    val smaller = ops.compressRasterized(source, .40f)
+                                    result.delete(); result = smaller
+                                }
+                                preparedSend = result to limit
+                            } catch (e: Exception) { snackbar.showSnackbar("No se pudo preparar el archivo: ${e.message}") }
+                            finally { busy = false }
+                        }
+                    }
+                }) { Text("Analizar resultado") } },
+                dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
+        preparedSend?.let { (file, limit) ->
+            val mb = file.length() / (1024.0 * 1024.0)
+            var zoomPreview by remember { mutableFloatStateOf(1f) }
+            AlertDialog(onDismissRequest = { file.delete(); preparedSend = null }, title = { Text("Resultado para enviar") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Peso obtenido: %.2f MB · Máximo elegido: %d MB".format(Locale.US, mb, limit), fontWeight = FontWeight.Bold)
+                    Text(if (mb > limit) "Supera el límite. Podés guardarlo igual o probar con otro objetivo." else "Cumple el límite elegido.", color = if (mb > limit) MaterialTheme.colorScheme.error else Purple)
+                    Text("Ampliá la vista para comprobar que la firma o el sello se lean.")
+                    PageThumbnail(Uri.fromFile(file), 0, Modifier.fillMaxWidth().height((150 * zoomPreview).dp))
+                    Slider(zoomPreview, { zoomPreview = it }, valueRange = 1f..2f)
+                    Text("La copia se rasterizó: no conserva enlaces ni texto seleccionable.", style = MaterialTheme.typography.bodySmall)
+                } },
+                confirmButton = { TextButton(onClick = {
+                    preparedSend = null
+                    pendingOperation = "para-enviar"; pending = file
+                }) { Text("Guardar copia") } },
+                dismissButton = { TextButton(onClick = { file.delete(); preparedSend = null }) { Text("Cancelar") } })
+        }
+        wordPreview?.let { preview ->
+            AlertDialog(onDismissRequest = { preview.file.delete(); wordPreview = null },
+                title = { Text("Vista previa · Word a PDF") },
+                text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${preview.pages} páginas · ${preview.tables} tablas")
+                    PageThumbnail(Uri.fromFile(preview.file), 0, Modifier.fillMaxWidth().height(260.dp))
+                    Text(preview.warning, style = MaterialTheme.typography.bodySmall)
+                } },
+                confirmButton = { TextButton(onClick = {
+                    pending?.delete(); pendingSourceName = wordSource?.let { fileNameFor(context, it) }
+                    pendingOperation = "Word"; pending = preview.file; wordPreview = null
+                }) { Text("Guardar PDF") } },
+                dismissButton = { TextButton(onClick = {
+                    preview.file.delete(); wordPreview = null
+                    wordSource?.let { source -> perform("texto-Word") { ops.documentToPdf(source, true) } }
+                }) { Text("Crear PDF con el texto de Word") } }
+            )
+        }
+        if (wordIssue != null) AlertDialog(onDismissRequest = { wordIssue = null },
+            title = { Text("Diseño de Word no compatible") },
+            text = { Text("${wordIssue.orEmpty()}\n\nPodés crear una copia con el texto, sin conservar tablas ni formatos, o cancelar.") },
+            confirmButton = { TextButton(onClick = {
+                wordIssue = null
+                wordSource?.let { source -> perform("texto-Word") { ops.documentToPdf(source, true) } }
+            }) { Text("Crear PDF con el texto de Word") } },
+            dismissButton = { TextButton(onClick = { wordIssue = null }) { Text("Cancelar") } })
         lastSavedUri?.let { savedUri ->
             AlertDialog(onDismissRequest = { lastSavedUri = null }, title = { Text("PDF guardado") },
                 text = { Text("La copia está lista. Podés abrirla en otro lector o compartirla.") },
@@ -1230,9 +1342,9 @@ private fun PlacementEditor(
 
 @Composable
 private fun HomeScreen(
-    recent: List<String>, draft: EditorDraftStore.Draft?, open: () -> Unit,
+    recent: List<String>, draft: EditorDraftStore.Draft?, deliveryPattern: String, open: () -> Unit,
     action: (Tool) -> Unit, openRecent: (String) -> Unit,
-    resumeDraft: (EditorDraftStore.Draft) -> Unit
+    resumeDraft: (EditorDraftStore.Draft) -> Unit, repeatDelivery: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -1297,6 +1409,12 @@ private fun HomeScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 Text("Elegí una acción. Si necesita un documento, te pediremos que abras el PDF. Para más herramientas, entrá al visor.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                if (deliveryPattern != "Fotos") {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = repeatDelivery, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Repeat, null); Spacer(Modifier.width(8.dp)); Text("Repetir una entrega · $deliveryPattern", maxLines = 1)
+                    }
+                }
             }
         }
         item { Text("Documentos recientes", Modifier.padding(start = 22.dp, top = 8.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
@@ -1356,7 +1474,88 @@ private fun OriginalTextEditor(uri: Uri, page: Int, onDismiss: () -> Unit, onRep
 }
 
 @Composable
-private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onSearch: () -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onOriginal: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onMarkup: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit, onCompress: () -> Unit, onSearchable: () -> Unit) {
+private fun MergePreview(files: List<Uri>, onDismiss: () -> Unit, onMerge: (List<Uri>) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val ops = remember { PdfOperations(context) }
+    val order = remember(files) { mutableStateListOf<Uri>().apply { addAll(files) } }
+    val counts = remember { mutableStateMapOf<String, Int>() }
+    LaunchedEffect(files) {
+        files.forEach { uri -> counts[uri.toString()] = try { ops.pageCount(uri) } catch (_: Exception) { -1 } }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Preparar unión") },
+        text = {
+            Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Revisá el orden antes de generar el PDF. Podés poner una carátula al principio aunque la hayas elegido al final.", style = MaterialTheme.typography.bodySmall)
+                order.forEachIndexed { index, uri ->
+                    Row(Modifier.fillMaxWidth().background(Color(0xFFF0EDF9), RoundedCornerShape(12.dp)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        PageThumbnail(uri, 0, Modifier.size(42.dp, 58.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(fileNameFor(context, uri), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                            Text("${counts[uri.toString()]?.takeIf { it >= 0 } ?: "?"} páginas", style = MaterialTheme.typography.labelSmall)
+                        }
+                        IconButton(onClick = { if (index > 0) { val item = order.removeAt(index); order.add(index - 1, item) } }, enabled = index > 0) { Icon(Icons.Default.KeyboardArrowUp, "Subir") }
+                        IconButton(onClick = { if (index < order.lastIndex) { val item = order.removeAt(index); order.add(index + 1, item) } }, enabled = index < order.lastIndex) { Icon(Icons.Default.KeyboardArrowDown, "Bajar") }
+                        IconButton(onClick = { if (index > 0) { val item = order.removeAt(index); order.add(0, item) } }, enabled = index > 0) { Icon(Icons.Default.FirstPage, "Carátula al principio") }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onMerge(order.toList()) }, enabled = order.size >= 2 && order.all { (counts[it.toString()] ?: 0) > 0 }) { Text("Unir ${order.size} archivos") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } })
+}
+
+@Composable
+private fun PhotoOrderPreview(files: List<Uri>, suggestedPattern: String, onDismiss: () -> Unit, onCreate: (List<Uri>, String) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val order = remember(files) { mutableStateListOf<Uri>().apply { addAll(files) } }
+    var pattern by remember { mutableStateOf(suggestedPattern) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Fotos a PDF · Preparar entrega") },
+        text = { Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Ordená las fotos nuevas. El patrón de nombre se recuerda para la próxima entrega.")
+            OutlinedTextField(pattern, { pattern = it.take(60) }, label = { Text("Patrón del archivo") }, modifier = Modifier.fillMaxWidth())
+            order.forEachIndexed { index, uri ->
+                var thumb by remember(uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
+                LaunchedEffect(uri) { thumb = try { decodeEditableImage(context, uri) } catch (_: Exception) { null } }
+                Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val bitmap = thumb
+                    if (bitmap != null) Image(bitmap.asImageBitmap(), "Foto ${index + 1}", Modifier.size(50.dp, 65.dp), contentScale = ContentScale.Fit)
+                    else Icon(Icons.Default.Image, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(fileNameFor(context, uri), modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    IconButton(onClick = { if (index > 0) { val item = order.removeAt(index); order.add(index - 1, item) } }, enabled = index > 0) { Icon(Icons.Default.KeyboardArrowUp, "Subir") }
+                    IconButton(onClick = { if (index < order.lastIndex) { val item = order.removeAt(index); order.add(index + 1, item) } }, enabled = index < order.lastIndex) { Icon(Icons.Default.KeyboardArrowDown, "Bajar") }
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = { onCreate(order.toList(), pattern.ifBlank { "Fotos" }) }) { Text("Crear PDF de ${order.size} fotos") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } })
+}
+
+@Composable
+private fun OcrPageChooser(uri: Uri, count: Int, initialPage: Int, onDismiss: () -> Unit, onConfirm: (Int) -> Unit) {
+    var chosen by remember { mutableIntStateOf(initialPage) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Copiar texto de una página") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Elegí la página para reconocer con OCR sin conexión.")
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(count) { index ->
+                        Column(Modifier.width(105.dp).background(if (chosen == index) Color(0xFFE5DFFF) else Back, RoundedCornerShape(12.dp))
+                            .clickable { chosen = index }.padding(7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            PageThumbnail(uri, index, Modifier.size(88.dp, 125.dp))
+                            Text("Página ${index + 1}")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(chosen) }) { Text("Extraer texto") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } })
+}
+
+@Composable
+private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onSearch: () -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onOriginal: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onMarkup: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit, onCompress: () -> Unit, onPrepare: () -> Unit, onSearchable: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
     var image by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -1420,7 +1619,8 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                             "Páginas" -> listOf("Organizar páginas" to onPages, "Extraer páginas" to onExtract, "Rotar PDF" to onRotate)
                             else -> listOf("Copiar texto de una página" to onOcr, "Crear PDF con búsqueda (OCR)" to onSearchable,
                                 "Marca de agua" to onWatermark, "Proteger con clave" to onProtect,
-                                "Comprimir" to onCompress, "Acerca de" to { showAbout = true })
+                                "Comprimir" to onCompress, "Preparar para enviar" to onPrepare,
+                                "Acerca de" to { showAbout = true })
                         }
                         actions.forEach { (text, action) ->
                             DropdownMenuItem(text = { Text(text) }, onClick = { openMenu = null; action() })
