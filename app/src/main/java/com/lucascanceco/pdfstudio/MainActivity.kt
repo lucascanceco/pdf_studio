@@ -329,26 +329,22 @@ private fun PdfStudioApp(initialUri: Uri?) {
             }, confirmButton = { TextButton(onClick = {
                 if (signature.any { it.size > 1 }) {
                     val lines = signature.map { it.toList() }
-                    perform {
-                        val bitmap = android.graphics.Bitmap.createBitmap(900, 300, android.graphics.Bitmap.Config.ARGB_8888)
-                        val canvas = android.graphics.Canvas(bitmap)
-                        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                            color = android.graphics.Color.rgb(36, 35, 52)
-                            strokeWidth = 5f
-                            strokeCap = android.graphics.Paint.Cap.ROUND
-                            style = android.graphics.Paint.Style.STROKE
-                        }
-                        // Input coordinates are in screen pixels; normalize to a 900x300 image.
-                        val maxX = lines.flatten().maxOf { it.x }.coerceAtLeast(1f)
-                        val maxY = lines.flatten().maxOf { it.y }.coerceAtLeast(1f)
-                        lines.forEach { points ->
-                            points.zipWithNext().forEach { (a, b) ->
-                                canvas.drawLine(a.x / maxX * 860f, a.y / maxY * 270f, b.x / maxX * 860f, b.y / maxY * 270f, paint)
-                            }
-                        }
-                        try { ops.stampImage(current!!, page, bitmap, .15f, .75f, .4f) }
-                        finally { bitmap.recycle() }
+                    val bitmap = android.graphics.Bitmap.createBitmap(900, 300, android.graphics.Bitmap.Config.ARGB_8888)
+                    val canvas = android.graphics.Canvas(bitmap)
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.rgb(36, 35, 52)
+                        strokeWidth = 5f
+                        strokeCap = android.graphics.Paint.Cap.ROUND
+                        style = android.graphics.Paint.Style.STROKE
                     }
+                    val maxX = lines.flatten().maxOf { it.x }.coerceAtLeast(1f)
+                    val maxY = lines.flatten().maxOf { it.y }.coerceAtLeast(1f)
+                    lines.forEach { points ->
+                        points.zipWithNext().forEach { (a, b) ->
+                            canvas.drawLine(a.x / maxX * 860f, a.y / maxY * 270f, b.x / maxX * 860f, b.y / maxY * 270f, paint)
+                        }
+                    }
+                    imageToPlace = bitmap
                 }
                 signature.clear()
                 selectedTool = null
