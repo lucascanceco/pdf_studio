@@ -72,8 +72,10 @@ class PdfOperations(private val context: Context) {
                 PdfRenderer(pfd).use { renderer ->
                     require(page in 0 until renderer.pageCount)
                     renderer.openPage(page).use { pdfPage ->
-                        val h = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
-                        val image = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
+                        val requestedH = (width.toFloat() * pdfPage.height / pdfPage.width).toInt().coerceAtLeast(1)
+                        val bitmapW = if (requestedH > 4096) (width * 4096f / requestedH).toInt().coerceAtLeast(1) else width
+                        val bitmapH = requestedH.coerceAtMost(4096)
+                        val image = Bitmap.createBitmap(bitmapW, bitmapH, Bitmap.Config.ARGB_8888)
                         image.eraseColor(android.graphics.Color.WHITE)
                         pdfPage.render(image, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         image
@@ -446,14 +448,24 @@ class PdfOperations(private val context: Context) {
         try {
             PDDocument().use { document ->
                 uris.forEach { uri ->
+                    // Downsample large camera images before embedding, avoiding memory exhaustion.
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    context.contentResolver.openInputStream(uri).use { stream ->
+                        requireNotNull(stream) { "Imagen no accesible" }
+                        BitmapFactory.decodeStream(stream, null, bounds)
+                    }
+                    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Imagen no válida" }
+                    var sample = 1
+                    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2800) sample *= 2
                     val bitmap = context.contentResolver.openInputStream(uri).use { stream ->
                         requireNotNull(stream) { "Imagen no accesible" }
-                        BitmapFactory.decodeStream(stream)
+                        BitmapFactory.decodeStream(stream, null, BitmapFactory.Options().apply { inSampleSize = sample })
                     } ?: error("Imagen no válida")
                     try {
                         val page = PDPage(PDRectangle.A4)
                         document.addPage(page)
-                        val image = LosslessFactory.createFromImage(document, bitmap)
+                        val image = if (bitmap.hasAlpha()) LosslessFactory.createFromImage(document, bitmap)
+                            else JPEGFactory.createFromImage(document, bitmap, .90f)
                         val availableW = page.mediaBox.width - 48f
                         val availableH = page.mediaBox.height - 48f
                         val scale = minOf(availableW / bitmap.width, availableH / bitmap.height)

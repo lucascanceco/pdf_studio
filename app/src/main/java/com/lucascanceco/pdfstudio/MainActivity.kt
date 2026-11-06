@@ -11,6 +11,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -57,6 +59,18 @@ private val Purple = Color(0xFF6355D9)
 private val Ink = Color(0xFF242334)
 private val Back = Color(0xFFF7F6FB)
 private val Pastels = listOf(Color(0xFFE5DFFF), Color(0xFFFFE1EB), Color(0xFFDFF5EC), Color(0xFFFFEAD9), Color(0xFFE3F2FC), Color(0xFFFFEDD1))
+
+/** A bounded decode prevents large phone photos from exhausting the editor's memory. */
+private fun decodeEditableImage(context: android.content.Context, uri: Uri): android.graphics.Bitmap? {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri).use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2400) sample *= 2
+    return context.contentResolver.openInputStream(uri).use {
+        android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -169,7 +183,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
     val stampPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null && current != null) {
             val bitmap = try {
-                context.contentResolver.openInputStream(uri).use { android.graphics.BitmapFactory.decodeStream(it) }
+                decodeEditableImage(context, uri)
             } catch (_: Exception) { null }
             if (bitmap != null) imageToPlace = bitmap
             else scope.launch { snackbar.showSnackbar("No se pudo abrir la imagen") }
@@ -177,7 +191,10 @@ private fun PdfStudioApp(initialUri: Uri?) {
     }
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val file = pending
-        if (uri != null && file != null) scope.launch {
+        if (uri == null) {
+            file?.delete()
+            pending = null
+        } else if (file != null) scope.launch {
             busy = true
             try { ops.export(file, uri); snackbar.showSnackbar("PDF guardado correctamente") }
             catch (e: Exception) { snackbar.showSnackbar("Error al guardar: ${e.message}") }
@@ -417,7 +434,7 @@ private fun BatchEditor(
     var renderError by remember { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { chosen ->
         if (chosen != null) {
-            val picked = try { context.contentResolver.openInputStream(chosen).use { android.graphics.BitmapFactory.decodeStream(it) } }
+            val picked = try { decodeEditableImage(context, chosen) }
             catch (_: Exception) { null }
             if (picked != null) {
                 imageToAdd?.recycle()
@@ -513,6 +530,23 @@ private fun BatchEditor(
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex).image?.recycle() }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
+                }
+                val latest = edits.lastOrNull()
+                if (latest != null && latest.pageIndex == page) {
+                    TextButton(onClick = {
+                        val edit = edits.removeAt(edits.lastIndex)
+                        mode = edit.kind
+                        first = Offset(edit.x, edit.y)
+                        last = if (edit.kind == PdfOperations.EditKind.TEXT || edit.kind == PdfOperations.EditKind.IMAGE) null
+                            else Offset(edit.x + edit.width, edit.y + edit.height)
+                        if (edit.kind == PdfOperations.EditKind.TEXT) {
+                            textToAdd = edit.text; fontSize = edit.fontSize
+                        } else if (edit.kind == PdfOperations.EditKind.IMAGE) {
+                            imageToAdd?.recycle()
+                            imageToAdd = edit.image
+                            imageWidth = edit.width
+                        }
+                    }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text("Reeditar último cambio de esta página") }
                 }
                 Text(when (mode) {
                     PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
@@ -1018,19 +1052,19 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
             IconButton(onClick = onExtract, enabled = count > 0 && !busy) { Icon(Icons.Default.ContentCut, "Extraer páginas") }
             IconButton(onClick = onRotate, enabled = count > 0 && !busy) { Icon(Icons.Default.RotateRight, "Rotar páginas") }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Row(Modifier.fillMaxWidth().background(Color.White).horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
             TextButton(onClick = onText, enabled = !busy) { Icon(Icons.Default.TextFields, null); Spacer(Modifier.width(4.dp)); Text("Texto") }
             TextButton(onClick = onImage, enabled = !busy) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(4.dp)); Text("Imagen") }
             TextButton(onClick = onPages, enabled = !busy) { Icon(Icons.Default.Reorder, null); Spacer(Modifier.width(4.dp)); Text("Páginas") }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
+        Row(Modifier.fillMaxWidth().background(Color.White).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center) {
             TextButton(onClick = onSignature, enabled = !busy) { Icon(Icons.Default.Draw, null); Text("Firma") }
             TextButton(onClick = onMarkup, enabled = !busy) { Icon(Icons.Default.Highlight, null); Text("Marcar") }
             TextButton(onClick = onOcr, enabled = !busy) { Icon(Icons.Default.DocumentScanner, null); Text("OCR") }
             TextButton(onClick = onWatermark, enabled = !busy) { Icon(Icons.Default.WaterDrop, null); Text("Marca") }
             TextButton(onClick = onProtect, enabled = !busy) { Icon(Icons.Default.Lock, null); Text("Clave") }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
+        Row(Modifier.fillMaxWidth().background(Color.White).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.Center) {
             TextButton(onClick = onSearchable, enabled = !busy) { Icon(Icons.Default.FindInPage, null); Spacer(Modifier.width(5.dp)); Text("Crear PDF buscable (OCR)") }
             TextButton(onClick = onCompress, enabled = !busy) { Icon(Icons.Default.Compress, null); Spacer(Modifier.width(5.dp)); Text("Comprimir") }
         }
