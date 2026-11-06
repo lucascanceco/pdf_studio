@@ -172,6 +172,77 @@ class PdfOperations(private val context: Context) {
 
     enum class Markup { HIGHLIGHT, UNDERLINE, STRIKEOUT }
 
+    enum class EditKind { TEXT, HIGHLIGHT, UNDERLINE, STRIKEOUT }
+
+    /** Coordinates are normalized to each PDF page and remain stable if the keyboard resizes the UI. */
+    data class EditOperation(
+        val pageIndex: Int,
+        val kind: EditKind,
+        val x: Float,
+        val y: Float,
+        val width: Float = 0f,
+        val height: Float = 0f,
+        val text: String = "",
+        val fontSize: Float = 16f
+    )
+
+    /** Transactional multi-page editing: writes all staged changes into one new PDF. */
+    suspend fun applyEdits(uri: Uri, edits: List<EditOperation>): File = withContext(Dispatchers.IO) {
+        require(edits.isNotEmpty()) { "No hay modificaciones para guardar" }
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_edited_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                edits.forEach { edit ->
+                    require(edit.pageIndex in 0 until doc.numberOfPages)
+                    val page = doc.getPage(edit.pageIndex)
+                    val box = page.cropBox ?: page.mediaBox
+                    val x = box.lowerLeftX + box.width * edit.x.coerceIn(0f, 1f)
+                    val top = box.lowerLeftY + box.height * (1f - edit.y.coerceIn(0f, 1f))
+                    PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                        when (edit.kind) {
+                            EditKind.TEXT -> {
+                                val safe = edit.text.replace('\n', ' ').map { if (it.code in 32..126 || it.code in 160..255) it else '?' }.joinToString("")
+                                if (safe.isNotBlank()) {
+                                    stream.beginText()
+                                    stream.setFont(PDType1Font.HELVETICA, edit.fontSize.coerceIn(6f, 72f))
+                                    stream.setNonStrokingColor(28, 28, 40)
+                                    stream.newLineAtOffset(x, top)
+                                    stream.showText(safe)
+                                    stream.endText()
+                                }
+                            }
+                            else -> {
+                                val w = box.width * edit.width.coerceIn(.005f, 1f)
+                                val h = box.height * edit.height.coerceIn(.003f, 1f)
+                                stream.saveGraphicsState()
+                                if (edit.kind == EditKind.HIGHLIGHT) {
+                                    val alpha = PDExtendedGraphicsState()
+                                    alpha.nonStrokingAlphaConstant = .30f
+                                    stream.setGraphicsStateParameters(alpha)
+                                    stream.setNonStrokingColor(255, 211, 45)
+                                    stream.addRect(x, top - h, w, h)
+                                    stream.fill()
+                                } else {
+                                    stream.setStrokingColor(230, 78, 105)
+                                    stream.setLineWidth(1.5f)
+                                    val lineY = if (edit.kind == EditKind.UNDERLINE) top - h else top - h / 2f
+                                    stream.moveTo(x, lineY)
+                                    stream.lineTo(x + w, lineY)
+                                    stream.stroke()
+                                }
+                                stream.restoreGraphicsState()
+                            }
+                        }
+                    }
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
     /** Draws an annotation visually over an area chosen by the user. Does not delete original text. */
     suspend fun markup(uri: Uri, pageIndex: Int, xFraction: Float, yFraction: Float, widthFraction: Float, heightFraction: Float, type: Markup): File = withContext(Dispatchers.IO) {
         val source = copyToTemp(uri, ".pdf")
