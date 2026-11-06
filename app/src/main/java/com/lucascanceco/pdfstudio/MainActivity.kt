@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -49,7 +51,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK }
+private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK, COMPRESS }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
@@ -74,6 +76,9 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var pageSequence by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var watermark by remember { mutableStateOf("") }
+    var searchOpen by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<Int>>(emptyList()) }
     var ocrResult by remember { mutableStateOf<String?>(null) }
     val signature = remember { mutableStateListOf<List<Offset>>() }
     var signatureCurrent by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -168,10 +173,13 @@ private fun PdfStudioApp(initialUri: Uri?) {
                         }
                     }, { uri -> current = Uri.parse(uri) })
                 } else {
-                    ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onPages = {
+                    ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onSearch = { searchOpen = true }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onPages = {
                         pageSequence = (1..count).joinToString(",")
                         selectedTool = Tool.PAGES
-                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onOcr = {
+                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onCompress = { selectedTool = Tool.COMPRESS }, onSearchable = {
+                        val chosen = current!!
+                        perform { ocr.createSearchableCopy(chosen) }
+                    }, onOcr = {
                         scope.launch {
                             busy = true
                             try { ocrResult = ocr.recognize(current!!, page).ifBlank { "No se reconoció texto en esta página." } }
@@ -320,6 +328,33 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
+        if (searchOpen && current != null) {
+            AlertDialog(onDismissRequest = { searchOpen = false }, title = { Text("Buscar en el PDF") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(searchQuery, { searchQuery = it }, label = { Text("Palabra o frase") }, singleLine = true)
+                    Text(if (searchResults.isEmpty()) "Sin resultados todavía" else "Encontrado en las páginas: ${searchResults.joinToString(", ")}")
+                }
+            }, confirmButton = { TextButton(onClick = {
+                val chosen = current!!
+                scope.launch {
+                    busy = true
+                    try {
+                        searchResults = ops.search(chosen, searchQuery)
+                        searchResults.firstOrNull()?.let { page = it - 1 }
+                    } catch (e: Exception) { snackbar.showSnackbar("Búsqueda fallida: ${e.message}") }
+                    finally { busy = false }
+                }
+            }) { Text("Buscar") } }, dismissButton = { TextButton(onClick = { searchOpen = false }) { Text("Cerrar") } })
+        }
+        if (selectedTool == Tool.COMPRESS && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Comprimir PDF") }, text = {
+                Text("Esta opción convierte las páginas en imágenes JPEG para intentar reducir el tamaño. Se perderán el texto seleccionable, los enlaces y los formularios interactivos. El archivo original no se modifica; verificá que el nuevo PDF sea realmente más pequeño.")
+            }, confirmButton = { TextButton(onClick = {
+                val chosen = current!!
+                perform { ops.compressRasterized(chosen) }
+                selectedTool = null
+            }) { Text("Crear copia compacta") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
     }
 }
 
@@ -386,18 +421,21 @@ private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.Ima
 }
 
 @Composable
-private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit) {
+private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onSearch: () -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit, onCompress: () -> Unit, onSearchable: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
     var image by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var zoom by remember { mutableFloatStateOf(1f) }
     LaunchedEffect(uri, page) {
         image = null
+        zoom = 1f
         try { image = ops.renderPage(uri, page) } catch (_: Exception) {}
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().background(Color.White).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
             Text("Documento PDF", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+            IconButton(onClick = onSearch, enabled = !busy) { Icon(Icons.Default.Search, "Buscar texto") }
             IconButton(onClick = onExtract, enabled = count > 0 && !busy) { Icon(Icons.Default.ContentCut, "Extraer páginas") }
             IconButton(onClick = onRotate, enabled = count > 0 && !busy) { Icon(Icons.Default.RotateRight, "Rotar páginas") }
         }
@@ -412,10 +450,16 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
             TextButton(onClick = onWatermark, enabled = !busy) { Icon(Icons.Default.WaterDrop, null); Text("Marca") }
             TextButton(onClick = onProtect, enabled = !busy) { Icon(Icons.Default.Lock, null); Text("Clave") }
         }
+        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
+            TextButton(onClick = onSearchable, enabled = !busy) { Icon(Icons.Default.FindInPage, null); Spacer(Modifier.width(5.dp)); Text("Crear PDF buscable (OCR)") }
+            TextButton(onClick = onCompress, enabled = !busy) { Icon(Icons.Default.Compress, null); Spacer(Modifier.width(5.dp)); Text("Comprimir") }
+        }
         Box(Modifier.weight(1f).fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
             val bitmap = image
             if (bitmap == null) CircularProgressIndicator()
-            else Image(bitmap.asImageBitmap(), "Página ${page + 1}", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            else Image(bitmap.asImageBitmap(), "Página ${page + 1}", Modifier.fillMaxSize()
+                .pointerInput(uri, page) { detectTransformGestures { _, _, gestureZoom, _ -> zoom = (zoom * gestureZoom).coerceIn(1f, 5f) } }
+                .graphicsLayer(scaleX = zoom, scaleY = zoom), contentScale = ContentScale.Fit)
         }
         Row(Modifier.fillMaxWidth().background(Color.White).padding(12.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Anterior") }

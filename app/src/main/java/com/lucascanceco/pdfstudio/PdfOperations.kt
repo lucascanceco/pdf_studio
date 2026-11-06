@@ -13,10 +13,13 @@ import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
+import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream.AppendMode
 import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
+import com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode
+import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +43,21 @@ class PdfOperations(private val context: Context) {
     suspend fun pageCount(uri: Uri): Int = withContext(Dispatchers.IO) {
         val temp = copyToTemp(uri, ".pdf")
         try { PDDocument.load(temp).use { it.numberOfPages } } finally { temp.delete() }
+    }
+
+    suspend fun search(uri: Uri, query: String): List<Int> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        val source = copyToTemp(uri, ".pdf")
+        try {
+            PDDocument.load(source).use { doc ->
+                val stripper = PDFTextStripper()
+                (1..doc.numberOfPages).filter { page ->
+                    stripper.startPage = page
+                    stripper.endPage = page
+                    stripper.getText(doc).contains(query, ignoreCase = true)
+                }
+            }
+        } finally { source.delete() }
     }
 
     suspend fun renderPage(uri: Uri, page: Int, width: Int = 1200): Bitmap = withContext(Dispatchers.IO) {
@@ -203,6 +221,62 @@ class PdfOperations(private val context: Context) {
                         stream.newLineAtOffset(box.lowerLeftX + box.width * .12f, box.lowerLeftY + box.height * .5f)
                         stream.showText(safe)
                         stream.endText()
+                    }
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    /** Lossy option for image-heavy documents. Rasterizes pages; never silently overwrites the source. */
+    suspend fun compressRasterized(uri: Uri, quality: Float = .65f): File = withContext(Dispatchers.IO) {
+        val output = File.createTempFile("pdfstudio_compact_", ".pdf", context.cacheDir)
+        try {
+            val count = pageCount(uri)
+            PDDocument().use { doc ->
+                for (index in 0 until count) {
+                    val bitmap = renderPage(uri, index, 1000)
+                    try {
+                        val width = 595f
+                        val height = width * bitmap.height / bitmap.width
+                        val page = PDPage(PDRectangle(width, height))
+                        doc.addPage(page)
+                        val jpg = JPEGFactory.createFromImage(doc, bitmap, quality)
+                        PDPageContentStream(doc, page).use { it.drawImage(jpg, 0f, 0f, width, height) }
+                    } finally { bitmap.recycle() }
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+    }
+
+    data class OcrLine(val text: String, val x: Float, val baseline: Float, val height: Float)
+
+    /** Creates a searchable copy while preserving the original graphics. Invisible text can be selected/searched. */
+    suspend fun makeSearchable(uri: Uri, recognized: Map<Int, List<OcrLine>>): File = withContext(Dispatchers.IO) {
+        require(recognized.isNotEmpty())
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_searchable_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                recognized.forEach { (index, lines) ->
+                    val page = doc.getPage(index)
+                    val box = page.cropBox ?: page.mediaBox
+                    PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                        lines.forEach { line ->
+                            val safe = line.text.map { if (it.code in 32..126 || it.code in 160..255) it else ' ' }.joinToString("")
+                            if (safe.isNotBlank()) {
+                                stream.beginText()
+                                stream.setRenderingMode(RenderingMode.NEITHER)
+                                stream.setFont(PDType1Font.HELVETICA, (box.height * line.height).coerceIn(4f, 60f))
+                                stream.newLineAtOffset(box.lowerLeftX + box.width * line.x, box.lowerLeftY + box.height * (1f - line.baseline))
+                                stream.showText(safe)
+                                stream.endText()
+                            }
+                        }
                     }
                 }
                 doc.save(output)

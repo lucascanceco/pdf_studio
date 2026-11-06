@@ -19,4 +19,28 @@ class OcrOperations(context: Context) {
             finally { recognizer.close() }
         } finally { bitmap.recycle() }
     }
+
+    suspend fun createSearchableCopy(uri: Uri): java.io.File {
+        val count = pdf.pageCount(uri)
+        val linesByPage = mutableMapOf<Int, List<PdfOperations.OcrLine>>()
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        try {
+            for (index in 0 until count) {
+                val bitmap = pdf.renderPage(uri, index, 1700)
+                try {
+                    val result = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await()
+                    linesByPage[index] = result.textBlocks.flatMap { it.lines }.mapNotNull { line ->
+                        val rect = line.boundingBox ?: return@mapNotNull null
+                        PdfOperations.OcrLine(
+                            text = line.text,
+                            x = rect.left.toFloat() / bitmap.width,
+                            baseline = rect.bottom.toFloat() / bitmap.height,
+                            height = rect.height().toFloat() / bitmap.height
+                        )
+                    }
+                } finally { bitmap.recycle() }
+            }
+        } finally { recognizer.close() }
+        return pdf.makeSearchable(uri, linesByPage)
+    }
 }
