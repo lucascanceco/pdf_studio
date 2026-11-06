@@ -473,7 +473,7 @@ private fun BatchEditor(
                     OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex) }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
                 }
-                Text(if (mode == PdfOperations.EditKind.TEXT) "Tocá el lugar del PDF y pulsá Aplicar cambio. Repetí las veces que necesites." else "Arrastrá para seleccionar la zona y pulsá Aplicar cambio.", style = MaterialTheme.typography.labelSmall)
+                Text(if (mode == PdfOperations.EditKind.TEXT) "El texto se previsualiza en vivo: ajustá tamaño y ubicación tocando la página. Después pulsá Aplicar cambio." else "Arrastrá para seleccionar la zona y pulsá Aplicar cambio.", style = MaterialTheme.typography.labelSmall)
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                     val image = bitmap
                     if (image == null) {
@@ -530,7 +530,17 @@ private fun BatchEditor(
                                 val a = first
                                 if (a != null) {
                                     if (mode == PdfOperations.EditKind.TEXT) {
-                                        drawCircle(Purple, radius = 6.dp.toPx(), center = Offset(a.x * size.width, a.y * size.height))
+                                        val anchor = Offset(a.x * size.width, a.y * size.height)
+                                        if (textToAdd.isNotBlank()) {
+                                            val previewPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                                color = android.graphics.Color.rgb(28, 28, 40)
+                                                textSize = fontSize * size.width / 595f
+                                            }
+                                            drawContext.canvas.nativeCanvas.drawText(textToAdd.replace('\n', ' '), anchor.x, anchor.y, previewPaint)
+                                        }
+                                        drawCircle(Purple, radius = 3.dp.toPx(), center = anchor)
+                                        drawLine(Purple, anchor.copy(x = anchor.x - 9.dp.toPx()), anchor.copy(x = anchor.x + 9.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                                        drawLine(Purple, anchor.copy(y = anchor.y - 9.dp.toPx()), anchor.copy(y = anchor.y + 9.dp.toPx()), strokeWidth = 1.5.dp.toPx())
                                     } else {
                                         val b = last ?: a
                                         val x = min(a.x, b.x); val y = min(a.y, b.y)
