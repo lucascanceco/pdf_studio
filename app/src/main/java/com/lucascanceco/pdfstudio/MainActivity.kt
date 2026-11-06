@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -263,20 +264,11 @@ private fun PdfStudioApp(initialUri: Uri?) {
             )
         }
         if (selectedTool == Tool.PAGES && current != null) {
-            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Organizar páginas") }, text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Escribí los números en el orden deseado. Podés repetir una página para duplicarla o quitarla de la lista para eliminarla.")
-                    OutlinedTextField(pageSequence, { pageSequence = it }, label = { Text("Orden de páginas") })
-                    Text("Ejemplo: 3,1,2,2", style = MaterialTheme.typography.bodySmall)
-                }
-            }, confirmButton = { TextButton(onClick = {
-                val parts = pageSequence.split(",").map { it.trim().toIntOrNull() }
-                if (parts.isNotEmpty() && parts.all { it != null && it in 1..count }) {
-                    val indices = parts.map { it!! - 1 }
-                    perform { ops.reorder(current!!, indices) }
-                } else scope.launch { snackbar.showSnackbar("La lista contiene páginas inválidas") }
+            val source = current!!
+            PageOrganizer(source, count, onDismiss = { selectedTool = null }, onSave = { order ->
+                perform { ops.reorder(source, order) }
                 selectedTool = null
-            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+            })
         }
         if (ocrResult != null) {
             AlertDialog(onDismissRequest = { ocrResult = null }, title = { Text("Texto reconocido — página ${page + 1}") }, text = {
@@ -623,6 +615,70 @@ private fun BatchEditor(
                 }
             }
         }
+    }
+}
+
+/** Visual ordering with thumbnails, duplication, deletion, and reversible changes. */
+@Composable
+private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSave: (List<Int>) -> Unit) {
+    val order = remember(uri, pageCount) { mutableStateListOf<Int>().apply { addAll(0 until pageCount) } }
+    var selected by remember { mutableIntStateOf(0) }
+    fun swap(a: Int, b: Int) {
+        if (a in order.indices && b in order.indices) {
+            val item = order[a]; order[a] = order[b]; order[b] = item
+            selected = b
+        }
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
+            Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
+                    Text("Organizar páginas", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { onSave(order.toList()) }, enabled = order.isNotEmpty()) { Text("Guardar PDF") }
+                }
+                Text("Tocá una miniatura. Podés moverla, duplicarla o quitarla antes de guardar.", style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { swap(selected, selected - 1) }, enabled = selected > 0) { Icon(Icons.Default.ArrowBack, "Mover izquierda") }
+                    IconButton(onClick = { swap(selected, selected + 1) }, enabled = selected + 1 < order.size) { Icon(Icons.Default.ArrowForward, "Mover derecha") }
+                    TextButton(onClick = { if (selected in order.indices) { order.add(selected + 1, order[selected]); selected++ } }, enabled = order.isNotEmpty()) { Text("Duplicar") }
+                    TextButton(onClick = { if (order.size > 1 && selected in order.indices) { order.removeAt(selected); selected = selected.coerceAtMost(order.lastIndex) } }, enabled = order.size > 1) { Text("Eliminar") }
+                }
+                Text("${order.size} páginas en la copia", color = Purple, style = MaterialTheme.typography.labelMedium)
+                LazyRow(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
+                    items(order.size) { index ->
+                        Column(
+                            Modifier.width(138.dp)
+                                .background(if (selected == index) Color(0xFFE4DEFF) else Color.White, RoundedCornerShape(14.dp))
+                                .clickable { selected = index }
+                                .padding(8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            PageThumbnail(uri, order[index], Modifier.fillMaxWidth().height(190.dp))
+                            Spacer(Modifier.height(6.dp))
+                            Text("Posición ${index + 1}", fontWeight = FontWeight.SemiBold)
+                            Text("Original ${order[index] + 1}", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { order.clear(); order.addAll(0 until pageCount); selected = 0 }, modifier = Modifier.fillMaxWidth()) { Text("Restablecer orden original") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PageThumbnail(uri: Uri, pageIndex: Int, modifier: Modifier = Modifier) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val ops = remember { PdfOperations(context) }
+    var preview by remember(uri, pageIndex) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(uri, pageIndex) {
+        preview = try { ops.renderPage(uri, pageIndex, 260) } catch (_: Exception) { null }
+    }
+    Box(modifier.background(Color(0xFFEBEAF1), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+        val bitmap = preview
+        if (bitmap == null) CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+        else Image(bitmap.asImageBitmap(), "Página original ${pageIndex + 1}", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
     }
 }
 
