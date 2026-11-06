@@ -31,3 +31,7 @@ La app no solicita permiso `INTERNET`. Los archivos se eligen con el selector de
 ## Diseño de logo
 
 Hoja blanca con esquina doblada y tres trazos sobre un fondo violeta. Vectorial, escalable y sin imágenes rasterizadas.
+
+## Estado del editor (sin validar en APK)
+
+Se incorporaron código para texto e imágenes, firma, organización de páginas, OCR offline, contraseña y marca de agua. Requieren compilación y pruebas antes de una versión instalable. La edición directa de elementos de texto preexistentes, la conversión DOCX de alta fidelidad y la compresión optimizada aún no están disponibles.
