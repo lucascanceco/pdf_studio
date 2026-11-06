@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -684,7 +685,7 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                     Text("Organizar páginas", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                     TextButton(onClick = { onSave(order.toList()) }, enabled = order.isNotEmpty()) { Text("Guardar PDF") }
                 }
-                Text("Tocá una miniatura. Podés moverla, duplicarla o quitarla antes de guardar.", style = MaterialTheme.typography.bodySmall)
+                Text("Tocá una miniatura o mantenela pulsada para arrastrarla. También podés mover, duplicar o eliminar.", style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { swap(selected, selected - 1) }, enabled = selected > 0) { Icon(Icons.Default.ArrowBack, "Mover izquierda") }
                     IconButton(onClick = { swap(selected, selected + 1) }, enabled = selected + 1 < order.size) { Icon(Icons.Default.ArrowForward, "Mover derecha") }
@@ -698,6 +699,20 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                             Modifier.width(138.dp)
                                 .background(if (selected == index) Color(0xFFE4DEFF) else Color.White, RoundedCornerShape(14.dp))
                                 .clickable { selected = index }
+                                .pointerInput(index, order.size) {
+                                    var dragged = 0f
+                                    var moved = false
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { selected = index; dragged = 0f; moved = false }
+                                    ) { change, movement ->
+                                        dragged += movement.x
+                                        if (!moved && abs(dragged) > 54.dp.toPx()) {
+                                            swap(index, index + if (dragged > 0f) 1 else -1)
+                                            moved = true
+                                        }
+                                        change.consume()
+                                    }
+                                }
                                 .padding(8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
