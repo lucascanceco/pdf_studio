@@ -243,32 +243,22 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Extraer") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
-        if ((selectedTool == Tool.TEXT || selectedTool == Tool.MARKUP) && current != null) {
+        if ((selectedTool == Tool.TEXT || selectedTool == Tool.MARKUP || imageToPlace != null) && current != null) {
             val source = current!!
             BatchEditor(
                 uri = source,
                 initialPage = page,
                 pageCount = count,
                 startWithText = selectedTool == Tool.TEXT,
-                onDismiss = { selectedTool = null },
+                initialImage = imageToPlace,
+                onDismiss = { selectedTool = null; imageToPlace = null },
                 onSave = { edits ->
-                    perform { ops.applyEdits(source, edits) }
-                    selectedTool = null
-                }
-            )
-        }
-        val selectedImage = imageToPlace
-        if (selectedImage != null && current != null) {
-            val source = current!!
-            val imagePage = page
-            ImagePlacementEditor(source, imagePage, count, selectedImage,
-                onDismiss = { imageToPlace = null },
-                onSave = { stamps ->
-                    imageToPlace = null
                     perform {
-                        try { ops.stampImages(source, stamps) }
-                        finally { stamps.forEach { it.bitmap.recycle() } }
+                        try { ops.applyEdits(source, edits) }
+                        finally { edits.mapNotNull { it.image }.forEach { it.recycle() } }
                     }
+                    selectedTool = null
+                    imageToPlace = null
                 }
             )
         }
@@ -415,6 +405,7 @@ private fun BatchEditor(
     initialPage: Int,
     pageCount: Int,
     startWithText: Boolean,
+    initialImage: android.graphics.Bitmap?,
     onDismiss: () -> Unit,
     onSave: (List<PdfOperations.EditOperation>) -> Unit
 ) {
@@ -424,12 +415,26 @@ private fun BatchEditor(
     val edits = remember { mutableStateListOf<PdfOperations.EditOperation>() }
     var page by remember { mutableIntStateOf(initialPage) }
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var mode by remember { mutableStateOf(if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
+    var mode by remember { mutableStateOf(if (initialImage != null) PdfOperations.EditKind.IMAGE else if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
+    var imageToAdd by remember { mutableStateOf(initialImage) }
+    var imageWidth by remember { mutableFloatStateOf(.45f) }
     var textToAdd by remember { mutableStateOf("") }
     var fontSize by remember { mutableFloatStateOf(16f) }
     var first by remember { mutableStateOf<Offset?>(null) }
     var last by remember { mutableStateOf<Offset?>(null) }
     var renderError by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { chosen ->
+        if (chosen != null) {
+            val picked = try { context.contentResolver.openInputStream(chosen).use { android.graphics.BitmapFactory.decodeStream(it) } }
+            catch (_: Exception) { null }
+            if (picked != null) {
+                imageToAdd?.recycle()
+                imageToAdd = picked
+                mode = PdfOperations.EditKind.IMAGE
+                first = null; last = null
+            }
+        }
+    }
 
     LaunchedEffect(uri, page) {
         bitmap = null
@@ -437,7 +442,7 @@ private fun BatchEditor(
         bitmap = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { renderError = true; null }
         first = null; last = null
     }
-    val selectionReady = first != null && (mode == PdfOperations.EditKind.TEXT || (last != null && abs(last!!.x - first!!.x) > .01f))
+    val selectionReady = first != null && (mode == PdfOperations.EditKind.TEXT || mode == PdfOperations.EditKind.IMAGE || (last != null && abs(last!!.x - first!!.x) > .01f))
 
     fun addToSession() {
         val a = first ?: return
@@ -448,6 +453,10 @@ private fun BatchEditor(
             edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
             textToAdd = ""
             keyboard?.hide()
+        } else if (mode == PdfOperations.EditKind.IMAGE) {
+            val image = imageToAdd ?: return
+            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, width = imageWidth, image = image))
+            imageToAdd = null
         } else {
             val x = min(a.x, b.x)
             val y = min(a.y, b.y)
@@ -458,16 +467,22 @@ private fun BatchEditor(
         first = null; last = null
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
+    fun discard() {
+        imageToAdd?.recycle()
+        edits.mapNotNull { it.image }.forEach { it.recycle() }
+        onDismiss()
+    }
+
+    Dialog(onDismissRequest = ::discard, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
         Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = Back) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
+                    IconButton(onClick = ::discard) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
                     Column(Modifier.weight(1f)) {
                         Text("Editar PDF", fontWeight = FontWeight.Bold)
                         Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = Purple)
                     }
-                    TextButton(onClick = { onSave(edits.toList()) }, enabled = edits.isNotEmpty()) {
+                    TextButton(onClick = { imageToAdd?.recycle(); imageToAdd = null; onSave(edits.toList()) }, enabled = edits.isNotEmpty()) {
                         Icon(Icons.Default.Check, null); Text("Guardar PDF")
                     }
                 }
@@ -478,9 +493,10 @@ private fun BatchEditor(
                 }
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     PdfOperations.EditKind.entries.forEachIndexed { index, option ->
-                        SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, 4)) {
+                        SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, PdfOperations.EditKind.entries.size)) {
                             Text(when (option) {
                                 PdfOperations.EditKind.TEXT -> "Texto"
+                                PdfOperations.EditKind.IMAGE -> "Imagen"
                                 PdfOperations.EditKind.HIGHLIGHT -> "Resaltar"
                                 PdfOperations.EditKind.UNDERLINE -> "Subrayar"
                                 PdfOperations.EditKind.STRIKEOUT -> "Tachar"
@@ -495,11 +511,22 @@ private fun BatchEditor(
                         Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
                     }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex) }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
-                    Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
+                if (mode == PdfOperations.EditKind.IMAGE) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(onClick = { picker.launch("image/*") }) { Text(if (imageToAdd == null) "Elegir imagen" else "Cambiar imagen") }
+                        Text("Tamaño ${(imageWidth * 100).toInt()}%", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    Slider(imageWidth, { imageWidth = it }, valueRange = .08f..1f)
                 }
-                Text(if (mode == PdfOperations.EditKind.TEXT) "El texto se previsualiza en vivo: ajustá tamaño y ubicación tocando la página. Después pulsá Aplicar cambio." else "Arrastrá para seleccionar la zona y pulsá Aplicar cambio.", style = MaterialTheme.typography.labelSmall)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex).image?.recycle() }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
+                }
+                Text(when (mode) {
+                    PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
+                    PdfOperations.EditKind.IMAGE -> "Tocá la página para ubicar la imagen y pulsá Aplicar cambio."
+                    else -> "Arrastrá para seleccionar la zona y pulsá Aplicar cambio."
+                }, style = MaterialTheme.typography.labelSmall)
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                     val image = bitmap
                     if (image == null) {
@@ -508,7 +535,7 @@ private fun BatchEditor(
                         val ratio = image.width.toFloat() / image.height
                         val drawWidth = if (maxWidth / ratio <= maxHeight) maxWidth else maxHeight * ratio
                         val drawHeight = drawWidth / ratio
-                        val gestureModifier = if (mode == PdfOperations.EditKind.TEXT) {
+                        val gestureModifier = if (mode == PdfOperations.EditKind.TEXT || mode == PdfOperations.EditKind.IMAGE) {
                             Modifier.pointerInput(page, mode) {
                                 detectTapGestures { tap ->
                                     first = Offset((tap.x / size.width).coerceIn(0f, 1f), (tap.y / size.height).coerceIn(0f, 1f))
@@ -551,6 +578,13 @@ private fun BatchEditor(
                                             textSize = edit.fontSize * size.width / 595f
                                         }
                                         drawContext.canvas.nativeCanvas.drawText(edit.text.replace('\n', ' '), edit.x * size.width, edit.y * size.height, paint)
+                                    } else if (edit.kind == PdfOperations.EditKind.IMAGE) {
+                                        edit.image?.let { image ->
+                                            val w = size.width * edit.width
+                                            val h = w * image.height / image.width
+                                            val left = edit.x * size.width; val top = edit.y * size.height
+                                            drawContext.canvas.nativeCanvas.drawBitmap(image, null, android.graphics.RectF(left, top, left + w, top + h), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
+                                        }
                                     } else drawMarkup(edit.kind, edit.x, edit.y, edit.width, edit.height)
                                 }
                                 val a = first
@@ -567,6 +601,14 @@ private fun BatchEditor(
                                         drawCircle(Purple, radius = 3.dp.toPx(), center = anchor)
                                         drawLine(Purple, anchor.copy(x = anchor.x - 9.dp.toPx()), anchor.copy(x = anchor.x + 9.dp.toPx()), strokeWidth = 1.5.dp.toPx())
                                         drawLine(Purple, anchor.copy(y = anchor.y - 9.dp.toPx()), anchor.copy(y = anchor.y + 9.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                                    } else if (mode == PdfOperations.EditKind.IMAGE) {
+                                        imageToAdd?.let { image ->
+                                            val w = size.width * imageWidth
+                                            val h = w * image.height / image.width
+                                            val left = a.x * size.width; val top = a.y * size.height
+                                            drawContext.canvas.nativeCanvas.drawBitmap(image, null, android.graphics.RectF(left, top, left + w, top + h), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
+                                            drawRect(Purple, Offset(left, top), androidx.compose.ui.geometry.Size(w, h), style = Stroke(width = 2.dp.toPx()))
+                                        }
                                     } else {
                                         val b = last ?: a
                                         val x = min(a.x, b.x); val y = min(a.y, b.y)
