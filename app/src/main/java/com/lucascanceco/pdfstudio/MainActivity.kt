@@ -8,11 +8,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -21,10 +23,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -43,12 +49,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE }
+private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
+    val ocr = remember { OcrOperations(context) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var current by remember { mutableStateOf(initialUri) }
@@ -60,6 +67,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var recent by remember { mutableStateOf<List<String>>(emptyList()) }
     var extractStart by remember { mutableStateOf("1") }
     var extractEnd by remember { mutableStateOf("1") }
+    var insertText by remember { mutableStateOf("") }
+    var textSize by remember { mutableFloatStateOf(16f) }
+    var textX by remember { mutableFloatStateOf(.12f) }
+    var textY by remember { mutableFloatStateOf(.15f) }
+    var pageSequence by remember { mutableStateOf("") }
+    var ocrResult by remember { mutableStateOf<String?>(null) }
+    val signature = remember { mutableStateListOf<List<Offset>>() }
+    var signatureCurrent by remember { mutableStateOf<List<Offset>>(emptyList()) }
 
     fun rememberUri(uri: Uri) {
         val value = uri.toString()
@@ -107,6 +122,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
     val images = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { files ->
         if (files.isNotEmpty()) perform { ops.imagesToPdf(files) }
     }
+    val stampPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null && current != null) perform {
+            val bitmap = context.contentResolver.openInputStream(uri).use { android.graphics.BitmapFactory.decodeStream(it) }
+                ?: error("Imagen no válida")
+            try { ops.stampImage(current!!, page, bitmap, .12f, .20f, .45f) }
+            finally { bitmap.recycle() }
+        }
+    }
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val file = pending
         if (uri != null && file != null) scope.launch {
@@ -143,7 +166,17 @@ private fun PdfStudioApp(initialUri: Uri?) {
                         }
                     }, { uri -> current = Uri.parse(uri) })
                 } else {
-                    ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } })
+                    ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onPages = {
+                        pageSequence = (1..count).joinToString(",")
+                        selectedTool = Tool.PAGES
+                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onOcr = {
+                        scope.launch {
+                            busy = true
+                            try { ocrResult = ocr.recognize(current!!, page).ifBlank { "No se reconoció texto en esta página." } }
+                            catch (e: Exception) { snackbar.showSnackbar("No se pudo reconocer texto: ${e.message}") }
+                            finally { busy = false }
+                        }
+                    })
                 }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
             }
@@ -161,6 +194,106 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 else scope.launch { snackbar.showSnackbar("Rango inválido") }
                 selectedTool = null
             }) { Text("Extraer") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
+        if (selectedTool == Tool.TEXT && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Agregar texto — página ${page + 1}") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = insertText, onValueChange = { insertText = it.take(1000) }, label = { Text("Texto a insertar") })
+                    Text("Tamaño: ${textSize.toInt()} pt")
+                    Slider(value = textSize, onValueChange = { textSize = it }, valueRange = 6f..72f)
+                    Text("Posición horizontal: ${(textX * 100).toInt()} %")
+                    Slider(value = textX, onValueChange = { textX = it }, valueRange = 0f..0.9f)
+                    Text("Posición vertical: ${(textY * 100).toInt()} %")
+                    Slider(value = textY, onValueChange = { textY = it }, valueRange = .05f..1f)
+                    Text("Se guarda una copia; el documento original no cambia.", style = MaterialTheme.typography.bodySmall)
+                }
+            }, confirmButton = { TextButton(onClick = {
+                if (insertText.isNotBlank()) perform { ops.addText(current!!, page, insertText, textX, textY, textSize) }
+                selectedTool = null
+            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
+        if (selectedTool == Tool.PAGES && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Organizar páginas") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Escribí los números en el orden deseado. Podés repetir una página para duplicarla o quitarla de la lista para eliminarla.")
+                    OutlinedTextField(pageSequence, { pageSequence = it }, label = { Text("Orden de páginas") })
+                    Text("Ejemplo: 3,1,2,2", style = MaterialTheme.typography.bodySmall)
+                }
+            }, confirmButton = { TextButton(onClick = {
+                val parts = pageSequence.split(",").map { it.trim().toIntOrNull() }
+                if (parts.isNotEmpty() && parts.all { it != null && it in 1..count }) {
+                    val indices = parts.map { it!! - 1 }
+                    perform { ops.reorder(current!!, indices) }
+                } else scope.launch { snackbar.showSnackbar("La lista contiene páginas inválidas") }
+                selectedTool = null
+            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
+        if (ocrResult != null) {
+            AlertDialog(onDismissRequest = { ocrResult = null }, title = { Text("Texto reconocido — página ${page + 1}") }, text = {
+                Column {
+                    Text("OCR sin conexión. Revisá el resultado antes de utilizarlo.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(ocrResult ?: "", { ocrResult = it }, modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp))
+                }
+            }, confirmButton = { TextButton(onClick = {
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("OCR PDF Studio", ocrResult))
+                ocrResult = null
+            }) { Text("Copiar") } }, dismissButton = { TextButton(onClick = { ocrResult = null }) { Text("Cerrar") } })
+        }
+        if (selectedTool == Tool.SIGNATURE && current != null) {
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Firmar página ${page + 1}") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Dibujá tu firma con el dedo. Se insertará sobre una copia del PDF.")
+                    Canvas(Modifier.fillMaxWidth().height(170.dp).background(Color(0xFFF5F3FA), RoundedCornerShape(12.dp))
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = { start -> signatureCurrent = listOf(start) },
+                                onDragEnd = { if (signatureCurrent.isNotEmpty()) signature.add(signatureCurrent); signatureCurrent = emptyList() },
+                                onDragCancel = { signatureCurrent = emptyList() }
+                            ) { change, _ ->
+                                signatureCurrent = signatureCurrent + change.position
+                                change.consume()
+                            }
+                        }) {
+                        (signature.toList() + listOf(signatureCurrent)).forEach { line ->
+                            if (line.size > 1) {
+                                val path = Path().apply {
+                                    moveTo(line.first().x, line.first().y)
+                                    line.drop(1).forEach { lineTo(it.x, it.y) }
+                                }
+                                drawPath(path, Ink, style = Stroke(width = 3f))
+                            }
+                        }
+                    }
+                    TextButton(onClick = { signature.clear(); signatureCurrent = emptyList() }) { Text("Borrar firma") }
+                }
+            }, confirmButton = { TextButton(onClick = {
+                if (signature.any { it.size > 1 }) {
+                    val lines = signature.map { it.toList() }
+                    perform {
+                        val bitmap = android.graphics.Bitmap.createBitmap(900, 300, android.graphics.Bitmap.Config.ARGB_8888)
+                        val canvas = android.graphics.Canvas(bitmap)
+                        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                            color = android.graphics.Color.rgb(36, 35, 52)
+                            strokeWidth = 5f
+                            strokeCap = android.graphics.Paint.Cap.ROUND
+                            style = android.graphics.Paint.Style.STROKE
+                        }
+                        // Input coordinates are in screen pixels; normalize to a 900x300 image.
+                        val maxX = lines.flatten().maxOf { it.x }.coerceAtLeast(1f)
+                        val maxY = lines.flatten().maxOf { it.y }.coerceAtLeast(1f)
+                        lines.forEach { points ->
+                            points.zipWithNext().forEach { (a, b) ->
+                                canvas.drawLine(a.x / maxX * 860f, a.y / maxY * 270f, b.x / maxX * 860f, b.y / maxY * 270f, paint)
+                            }
+                        }
+                        try { ops.stampImage(current!!, page, bitmap, .15f, .75f, .4f) }
+                        finally { bitmap.recycle() }
+                    }
+                }
+                signature.clear()
+                selectedTool = null
+            }) { Text("Insertar firma") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
     }
 }
@@ -228,7 +361,7 @@ private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.Ima
 }
 
 @Composable
-private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onExtract: () -> Unit, onRotate: () -> Unit) {
+private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
     var image by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -242,6 +375,15 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
             Text("Documento PDF", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
             IconButton(onClick = onExtract, enabled = count > 0 && !busy) { Icon(Icons.Default.ContentCut, "Extraer páginas") }
             IconButton(onClick = onRotate, enabled = count > 0 && !busy) { Icon(Icons.Default.RotateRight, "Rotar páginas") }
+        }
+        Row(Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+            TextButton(onClick = onText, enabled = !busy) { Icon(Icons.Default.TextFields, null); Spacer(Modifier.width(4.dp)); Text("Texto") }
+            TextButton(onClick = onImage, enabled = !busy) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(4.dp)); Text("Imagen") }
+            TextButton(onClick = onPages, enabled = !busy) { Icon(Icons.Default.Reorder, null); Spacer(Modifier.width(4.dp)); Text("Páginas") }
+        }
+        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
+            TextButton(onClick = onSignature, enabled = !busy) { Icon(Icons.Default.Draw, null); Text("Firma") }
+            TextButton(onClick = onOcr, enabled = !busy) { Icon(Icons.Default.DocumentScanner, null); Text("OCR") }
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
             val bitmap = image
