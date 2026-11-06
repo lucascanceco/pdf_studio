@@ -115,6 +115,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var selectedTool by remember { mutableStateOf<Tool?>(null) }
     var pending by remember { mutableStateOf<File?>(null) }
     var pendingEditBatch by remember { mutableStateOf<List<PdfOperations.EditOperation>?>(null) }
+    var saveRetry by remember { mutableStateOf(false) }
     var pendingOperation by remember { mutableStateOf("copia") }
     var pendingSourceName by remember { mutableStateOf<String?>(null) }
     var lastSavedUri by remember { mutableStateOf<Uri?>(null) }
@@ -242,12 +243,13 @@ private fun PdfStudioApp(initialUri: Uri?) {
         val file = pending
         if (uri == null) {
             if (pendingEditBatch == null) { file?.delete(); pending = null }
-            else scope.launch { snackbar.showSnackbar("Guardado cancelado. Tus cambios siguen en el editor; podés reintentar.") }
+            else saveRetry = true
         } else if (file != null) scope.launch {
             busy = true
             try {
                 ops.export(file, uri)
                 file.delete(); pending = null
+                saveRetry = false
                 pendingEditBatch?.let { edits ->
                     edits.mapNotNull { it.image }.distinct().forEach { it.recycle() }
                     pendingEditBatch = null
@@ -256,7 +258,10 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 }
                 lastSavedUri = uri
                 snackbar.showSnackbar("PDF guardado correctamente")
-            } catch (e: Exception) { snackbar.showSnackbar("No se pudo escribir: ${e.message}. Elegí otra ubicación y reintentá.") }
+            } catch (e: Exception) {
+                saveRetry = true
+                snackbar.showSnackbar("No se pudo escribir: ${e.message}. Podés elegir otro destino.")
+            }
             finally { busy = false }
         }
     }
@@ -605,6 +610,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 wordSource?.let { source -> perform("texto-Word") { ops.documentToPdf(source, true) } }
             }) { Text("Crear PDF con el texto de Word") } },
             dismissButton = { TextButton(onClick = { wordIssue = null }) { Text("Cancelar") } })
+        if (saveRetry && pending != null) AlertDialog(onDismissRequest = { saveRetry = false },
+            title = { Text("Guardar la copia") },
+            text = { Text("El destino anterior se canceló o falló. Los cambios siguen intactos. Elegí otra carpeta para reintentar o volvé al editor.") },
+            confirmButton = { TextButton(onClick = {
+                saveRetry = false
+                save.launch(suggestedCopyName(pendingSourceName ?: current?.let { fileNameFor(context, it) } ?: "PDFStudio", pendingOperation))
+            }) { Text("Elegir otra carpeta") } },
+            dismissButton = { TextButton(onClick = { saveRetry = false }) { Text("Seguir editando") } })
         lastSavedUri?.let { savedUri ->
             AlertDialog(onDismissRequest = { lastSavedUri = null }, title = { Text("PDF guardado") },
                 text = { Text("La copia está lista. Podés abrirla en otro lector o compartirla.") },
