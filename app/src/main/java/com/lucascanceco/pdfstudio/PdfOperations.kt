@@ -283,6 +283,35 @@ class PdfOperations(private val context: Context) {
         finally { source.delete() }
     }
 
+    data class ImageStamp(val pageIndex: Int, val bitmap: Bitmap, val x: Float, val y: Float, val width: Float)
+
+    /** Writes every image in one document pass so multiple placements share a single export. */
+    suspend fun stampImages(uri: Uri, stamps: List<ImageStamp>): File = withContext(Dispatchers.IO) {
+        require(stamps.isNotEmpty()) { "No hay imágenes para guardar" }
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_stamps_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                stamps.forEach { stamp ->
+                    require(stamp.pageIndex in 0 until doc.numberOfPages)
+                    val page = doc.getPage(stamp.pageIndex)
+                    val box = page.cropBox ?: page.mediaBox
+                    val w = box.width * stamp.width.coerceIn(.05f, 1f)
+                    val h = w * stamp.bitmap.height / stamp.bitmap.width
+                    val x = box.lowerLeftX + box.width * stamp.x.coerceIn(0f, 1f)
+                    val y = box.lowerLeftY + box.height * (1f - stamp.y.coerceIn(0f, 1f)) - h
+                    val image = LosslessFactory.createFromImage(doc, stamp.bitmap)
+                    PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                        stream.drawImage(image, x, y, w, h)
+                    }
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
     /** Stamps a locally chosen image with its alpha channel preserved. */
     suspend fun stampImage(uri: Uri, pageIndex: Int, bitmap: Bitmap, xFraction: Float, yFraction: Float, widthFraction: Float): File = withContext(Dispatchers.IO) {
         val source = copyToTemp(uri, ".pdf")
