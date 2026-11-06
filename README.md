@@ -4,9 +4,9 @@ Aplicación Android nativa para visualizar y manipular PDF sin conexión. Inspir
 
 ## Estado real
 
-**0.3.0-beta — compila con GitHub Actions; quedan pendientes las pruebas funcionales de regresión en distintos teléfonos.** Incluye visor con zoom, búsqueda, recientes, creación desde imágenes/TXT/DOCX textual, unión, extracción, rotación, organización visual con miniaturas, editor multipágina de texto/imágenes/marcas en una sola sesión, firma posicionable, OCR offline, PDF buscable, protección por contraseña, marcas de agua y compresión rasterizada opcional.
+**0.4.0-beta (versionCode 4), rama `release/integrated-0_4_0`.** Incluye visor con búsqueda y zoom, salto a página, Inicio con lectura/borrador reciente, creación desde fotos/TXT/DOCX, unión con vista previa y orden, extracción, rotación, organización con miniaturas y movimiento a posición, editor multipágina de texto/imágenes/marcas con vista previa y múltiples elementos, firmas ajustables, OCR offline, PDF buscable, protección, marca de agua y preparación para envío con peso objetivo.
 
-La edición de texto/objetos originales de PDF arbitrarios, la conservación de maquetación Word compleja, el reconocimiento perfecto de escaneos y el sistema completo de deshacer/rehacer **no están resueltos**. La función de marca visual **no es censura segura**. Consultar [TESTING.md](TESTING.md) para pruebas y limitaciones.
+Hay un **reemplazo de texto original muy acotado** para cadenas `Tj` simples, únicas y verificables. No sirve para cualquier PDF con fuentes incrustadas, glifos codificados o texto fragmentado; el motor rechaza casos incompatibles. DOCX admite párrafos, listas, tablas sencillas con filas enteras y saltos; no reproduce el diseño complejo de Word. La app ofrece salida solo-texto. OCR es aproximado y la marca visual **no es censura segura**. Consultar [TESTING.md](TESTING.md) para pruebas y límites exactos. **La compilación CI no sustituye la validación física ni la revisión de copias con otro lector.**
 
 ## Requisitos
 
@@ -21,14 +21,14 @@ La edición de texto/objetos originales de PDF arbitrarios, la conservación de 
 3. Compilar con **Build > Build APK(s)**.
 4. Instalar en un dispositivo Android 8+.
 
-La app no solicita permiso `INTERNET`. Los archivos se eligen con el selector del sistema y se guardan con `ACTION_CREATE_DOCUMENT`. No se modifican los originales.
+La app elimina `INTERNET` y `ACCESS_NETWORK_STATE` del manifiesto fusionado mediante `tools:node="remove"` porque dependencias pueden declararlos. No hay servicios de red deliberados. Los archivos se eligen con el selector del sistema y se guardan con `ACTION_CREATE_DOCUMENT`. No se modifican los originales; una cancelación o fallo de destino permite retomar la sesión del editor.
 
 ## Próximas etapas
 
-1. Pruebas reales en varios dispositivos, especialmente Android 8, 13 y 16; selección directa de anotaciones ya aplicadas.
+1. Pruebas reales en varios dispositivos, especialmente Android 8, 13 y 16, y apertura de las copias en un segundo lector.
 2. Escáner con cámara y corrección de perspectiva.
-3. Edición estructural avanzada: validar alcance y motor para modificar objetos originales.
-4. Deshacer/rehacer y conversión de formatos con mayor fidelidad.
+3. Motor de composición de texto/fuentes PDF complejas y fidelidad DOCX superior, si se incorpora un backend compatible offline.
+4. Historial completo de deshacer/rehacer y pruebas automáticas instrumentadas.
 
 ## Diseño de logo
 
