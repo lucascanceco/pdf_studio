@@ -72,7 +72,7 @@ class OriginalTextOperations(private val context: Context) {
                 tokens[index - 1] = COSString(replacement)
                 val stream = PDStream(document)
                 stream.createOutputStream().use { ContentStreamWriter(it).writeTokens(tokens) }
-                page.contents = stream
+                page.setContents(stream)
                 document.save(output)
             }
             // Validate actual text extraction. A graphical overprint would not pass this test.
