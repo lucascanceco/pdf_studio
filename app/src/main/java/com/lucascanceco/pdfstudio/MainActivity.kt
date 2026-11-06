@@ -49,7 +49,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE }
+private enum class Tool { IMAGES, MERGE, EXTRACT, ROTATE, TEXT, PAGES, OCR, SIGNATURE, PROTECT, WATERMARK }
 
 @Composable
 private fun PdfStudioApp(initialUri: Uri?) {
@@ -72,6 +72,8 @@ private fun PdfStudioApp(initialUri: Uri?) {
     var textX by remember { mutableFloatStateOf(.12f) }
     var textY by remember { mutableFloatStateOf(.15f) }
     var pageSequence by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var watermark by remember { mutableStateOf("") }
     var ocrResult by remember { mutableStateOf<String?>(null) }
     val signature = remember { mutableStateListOf<List<Offset>>() }
     var signatureCurrent by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -169,7 +171,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
                     ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onPages = {
                         pageSequence = (1..count).joinToString(",")
                         selectedTool = Tool.PAGES
-                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onOcr = {
+                    }, onImage = { stampPicker.launch("image/*") }, onSignature = { selectedTool = Tool.SIGNATURE }, onProtect = { selectedTool = Tool.PROTECT }, onWatermark = { selectedTool = Tool.WATERMARK }, onOcr = {
                         scope.launch {
                             busy = true
                             try { ocrResult = ocr.recognize(current!!, page).ifBlank { "No se reconoció texto en esta página." } }
@@ -295,6 +297,29 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Insertar firma") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
+        if ((selectedTool == Tool.PROTECT || selectedTool == Tool.WATERMARK) && current != null) {
+            val isProtect = selectedTool == Tool.PROTECT
+            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text(if (isProtect) "Proteger con contraseña" else "Agregar marca de agua") }, text = {
+                Column {
+                    if (isProtect) {
+                        Text("La contraseña será necesaria para abrir la copia. Guardala en un lugar seguro.")
+                        OutlinedTextField(password, { password = it }, label = { Text("Contraseña (4–64 caracteres)") }, singleLine = true)
+                    } else {
+                        Text("La marca de agua se aplicará a todas las páginas.")
+                        OutlinedTextField(watermark, { watermark = it.take(80) }, label = { Text("Texto de la marca") })
+                    }
+                }
+            }, confirmButton = { TextButton(onClick = {
+                val chosen = current!!
+                val chosenPassword = password
+                val chosenWatermark = watermark
+                if (isProtect && chosenPassword.length in 4..64) perform { ops.passwordProtect(chosen, chosenPassword) }
+                else if (!isProtect && chosenWatermark.isNotBlank()) perform { ops.addWatermark(chosen, chosenWatermark) }
+                else scope.launch { snackbar.showSnackbar("Ingresá un valor válido") }
+                password = ""
+                selectedTool = null
+            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+        }
     }
 }
 
@@ -361,7 +386,7 @@ private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.Ima
 }
 
 @Composable
-private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit) {
+private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack: () -> Unit, onPage: (Int) -> Unit, onExtract: () -> Unit, onRotate: () -> Unit, onText: () -> Unit, onPages: () -> Unit, onImage: () -> Unit, onSignature: () -> Unit, onOcr: () -> Unit, onProtect: () -> Unit, onWatermark: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val ops = remember { PdfOperations(context) }
     var image by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -384,6 +409,8 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
         Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.Center) {
             TextButton(onClick = onSignature, enabled = !busy) { Icon(Icons.Default.Draw, null); Text("Firma") }
             TextButton(onClick = onOcr, enabled = !busy) { Icon(Icons.Default.DocumentScanner, null); Text("OCR") }
+            TextButton(onClick = onWatermark, enabled = !busy) { Icon(Icons.Default.WaterDrop, null); Text("Marca") }
+            TextButton(onClick = onProtect, enabled = !busy) { Icon(Icons.Default.Lock, null); Text("Clave") }
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
             val bitmap = image
