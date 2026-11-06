@@ -417,14 +417,41 @@ private fun PlacementEditor(
     LaunchedEffect(uri, page) {
         bitmap = try { ops.renderPage(uri, page, 1200) } catch (_: Exception) { null }
     }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize(), color = Back) {
+    val canSave = position != null && (if (isText) value.isNotBlank() else dragEnd != null && abs(dragEnd!!.x - position!!.x) > 10f)
+    fun savePlacement() {
+        val a = position ?: return
+        if (pageSize.width == 0 || pageSize.height == 0) return
+        val b = dragEnd ?: a
+        val left = if (isText) a.x else min(a.x, b.x)
+        val top = if (isText) a.y else min(a.y, b.y)
+        val width = if (isText) 0f else abs(b.x - a.x)
+        val height = if (isText) 0f else abs(b.y - a.y)
+        onSave(
+            (left / pageSize.width).coerceIn(0f, 1f),
+            (top / pageSize.height).coerceIn(0f, 1f),
+            (width / pageSize.width).coerceIn(.02f, 1f),
+            (height / pageSize.height).coerceIn(.005f, 1f),
+            value, fontSize, mark
+        )
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = Back) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
                     Text(if (isText) "Colocar texto · Página ${page + 1}" else "Marcar · Página ${page + 1}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = ::savePlacement, enabled = canSave) { Icon(Icons.Default.Check, null); Text("Guardar") }
                 }
                 Text(if (isText) "Tocá la página en el punto exacto donde querés escribir." else "Arrastrá el dedo para seleccionar la zona. Podés repetir el gesto para corregir.", style = MaterialTheme.typography.bodySmall)
+                if (!isText) {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        PdfOperations.Markup.entries.forEachIndexed { index, mode ->
+                            SegmentedButton(selected = mark == mode, onClick = { mark = mode }, shape = SegmentedButtonDefaults.itemShape(index, 3)) {
+                                Text(when (mode) { PdfOperations.Markup.HIGHLIGHT -> "Resaltar"; PdfOperations.Markup.UNDERLINE -> "Subrayar"; PdfOperations.Markup.STRIKEOUT -> "Tachar" }, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                     val image = bitmap
@@ -481,33 +508,10 @@ private fun PlacementEditor(
                         Text("${fontSize.toInt()} pt", modifier = Modifier.width(55.dp))
                         Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
                     }
-                } else {
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        PdfOperations.Markup.entries.forEachIndexed { index, mode ->
-                            SegmentedButton(selected = mark == mode, onClick = { mark = mode }, shape = SegmentedButtonDefaults.itemShape(index, 3)) {
-                                Text(when (mode) { PdfOperations.Markup.HIGHLIGHT -> "Resaltar"; PdfOperations.Markup.UNDERLINE -> "Subrayar"; PdfOperations.Markup.STRIKEOUT -> "Tachar" }, style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                    }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { position = null; dragEnd = null }, modifier = Modifier.weight(1f)) { Text("Reubicar") }
-                    Button(onClick = {
-                        val a = position ?: return@Button
-                        if (pageSize.width == 0 || pageSize.height == 0) return@Button
-                        val b = dragEnd ?: a
-                        val left = if (isText) a.x else min(a.x, b.x)
-                        val top = if (isText) a.y else min(a.y, b.y)
-                        val width = if (isText) 0f else abs(b.x - a.x)
-                        val height = if (isText) 0f else abs(b.y - a.y)
-                        onSave(
-                            (left / pageSize.width).coerceIn(0f, 1f),
-                            (top / pageSize.height).coerceIn(0f, 1f),
-                            (width / pageSize.width).coerceIn(.02f, 1f),
-                            (height / pageSize.height).coerceIn(.005f, 1f),
-                            value, fontSize, mark
-                        )
-                    }, enabled = position != null && (if (isText) value.isNotBlank() else dragEnd != null && abs(dragEnd!!.x - position!!.x) > 10f), modifier = Modifier.weight(1f)) { Text("Guardar copia") }
+                    Button(onClick = ::savePlacement, enabled = canSave, modifier = Modifier.weight(1f)) { Text("Guardar copia") }
                 }
             }
         }
