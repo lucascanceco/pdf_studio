@@ -29,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -231,16 +232,16 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Extraer") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
-        if (selectedTool == Tool.TEXT && current != null) {
+        if ((selectedTool == Tool.TEXT || selectedTool == Tool.MARKUP) && current != null) {
             val source = current!!
-            val targetPage = page
-            PlacementEditor(
+            BatchEditor(
                 uri = source,
-                page = targetPage,
-                isText = true,
+                initialPage = page,
+                pageCount = count,
+                startWithText = selectedTool == Tool.TEXT,
                 onDismiss = { selectedTool = null },
-                onSave = { x, y, _, _, value, size, _ ->
-                    perform { ops.addText(source, targetPage, value, x, y, size) }
+                onSave = { edits ->
+                    perform { ops.applyEdits(source, edits) }
                     selectedTool = null
                 }
             )
@@ -378,19 +379,171 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 selectedTool = null
             }) { Text("Crear copia compacta") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
-        if (selectedTool == Tool.MARKUP && current != null) {
-            val source = current!!
-            val targetPage = page
-            PlacementEditor(
-                uri = source,
-                page = targetPage,
-                isText = false,
-                onDismiss = { selectedTool = null },
-                onSave = { x, y, w, h, _, _, mode ->
-                    perform { ops.markup(source, targetPage, x, y, w, h, mode) }
-                    selectedTool = null
+    }
+}
+
+/** Non-destructive edit session. All positions are page-relative, not screen-relative. */
+@Composable
+private fun BatchEditor(
+    uri: Uri,
+    initialPage: Int,
+    pageCount: Int,
+    startWithText: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (List<PdfOperations.EditOperation>) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val operations = remember { PdfOperations(context) }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val edits = remember { mutableStateListOf<PdfOperations.EditOperation>() }
+    var page by remember { mutableIntStateOf(initialPage) }
+    var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var mode by remember { mutableStateOf(if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
+    var textToAdd by remember { mutableStateOf("") }
+    var fontSize by remember { mutableFloatStateOf(16f) }
+    var first by remember { mutableStateOf<Offset?>(null) }
+    var last by remember { mutableStateOf<Offset?>(null) }
+    var renderError by remember { mutableStateOf(false) }
+
+    LaunchedEffect(uri, page) {
+        bitmap = null
+        renderError = false
+        bitmap = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { renderError = true; null }
+        first = null; last = null
+    }
+    val selectionReady = first != null && (mode == PdfOperations.EditKind.TEXT || (last != null && abs(last!!.x - first!!.x) > .01f))
+
+    fun addToSession() {
+        val a = first ?: return
+        if (!selectionReady) return
+        val b = last ?: a
+        if (mode == PdfOperations.EditKind.TEXT) {
+            if (textToAdd.isBlank()) return
+            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
+            textToAdd = ""
+            keyboard?.hide()
+        } else {
+            val x = min(a.x, b.x)
+            val y = min(a.y, b.y)
+            edits.add(PdfOperations.EditOperation(page, mode, x, y,
+                width = abs(a.x - b.x).coerceAtLeast(.005f),
+                height = abs(a.y - b.y).coerceAtLeast(.003f)))
+        }
+        first = null; last = null
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = Back) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
+                    Column(Modifier.weight(1f)) {
+                        Text("Editar PDF", fontWeight = FontWeight.Bold)
+                        Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = Purple)
+                    }
+                    TextButton(onClick = { onSave(edits.toList()) }, enabled = edits.isNotEmpty()) {
+                        Icon(Icons.Default.Check, null); Text("Guardar PDF")
+                    }
                 }
-            )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { page--; first = null; last = null }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Página anterior") }
+                    Text("Página ${page + 1} de $pageCount", fontWeight = FontWeight.SemiBold)
+                    IconButton(onClick = { page++; first = null; last = null }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Página siguiente") }
+                }
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    PdfOperations.EditKind.entries.forEachIndexed { index, option ->
+                        SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, 4)) {
+                            Text(when (option) {
+                                PdfOperations.EditKind.TEXT -> "Texto"
+                                PdfOperations.EditKind.HIGHLIGHT -> "Resaltar"
+                                PdfOperations.EditKind.UNDERLINE -> "Subrayar"
+                                PdfOperations.EditKind.STRIKEOUT -> "Tachar"
+                            }, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                Text(if (mode == PdfOperations.EditKind.TEXT) "Tocá la página, escribí y pulsá Añadir. Podés repetirlo." else "Arrastrá para marcar. Pulsá Añadir para dejar la marca visible.", style = MaterialTheme.typography.labelSmall)
+                BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                    val image = bitmap
+                    if (image == null) {
+                        if (renderError) Text("No se pudo visualizar esta página") else CircularProgressIndicator()
+                    } else {
+                        val ratio = image.width.toFloat() / image.height
+                        val drawWidth = if (maxWidth / ratio <= maxHeight) maxWidth else maxHeight * ratio
+                        val drawHeight = drawWidth / ratio
+                        val gestureModifier = if (mode == PdfOperations.EditKind.TEXT) {
+                            Modifier.pointerInput(page, mode) {
+                                detectTapGestures { tap ->
+                                    first = Offset((tap.x / size.width).coerceIn(0f, 1f), (tap.y / size.height).coerceIn(0f, 1f))
+                                    last = null
+                                }
+                            }
+                        } else {
+                            Modifier.pointerInput(page, mode) {
+                                detectDragGestures(
+                                    onDragStart = { start ->
+                                        first = Offset((start.x / size.width).coerceIn(0f, 1f), (start.y / size.height).coerceIn(0f, 1f))
+                                        last = first
+                                    },
+                                    onDragCancel = { first = null; last = null }
+                                ) { change, _ ->
+                                    last = Offset((change.position.x / size.width).coerceIn(0f, 1f), (change.position.y / size.height).coerceIn(0f, 1f))
+                                    change.consume()
+                                }
+                            }
+                        }
+                        Box(Modifier.size(drawWidth, drawHeight).clip(RoundedCornerShape(3.dp))) {
+                            Image(image.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                            Canvas(Modifier.fillMaxSize().then(gestureModifier)) {
+                                fun drawMarkup(kind: PdfOperations.EditKind, x: Float, y: Float, w: Float, h: Float) {
+                                    val left = x * size.width
+                                    val top = y * size.height
+                                    val width = w * size.width
+                                    val height = h * size.height
+                                    if (kind == PdfOperations.EditKind.HIGHLIGHT) {
+                                        drawRect(Color(0xFFFFD32D), Offset(left, top), androidx.compose.ui.geometry.Size(width, height), alpha = .35f)
+                                    } else {
+                                        val lineY = if (kind == PdfOperations.EditKind.UNDERLINE) top + height else top + height / 2f
+                                        drawLine(Color(0xFFE64E69), Offset(left, lineY), Offset(left + width, lineY), strokeWidth = 2.dp.toPx())
+                                    }
+                                }
+                                edits.filter { it.pageIndex == page }.forEach { edit ->
+                                    if (edit.kind == PdfOperations.EditKind.TEXT) {
+                                        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                                            color = android.graphics.Color.rgb(28, 28, 40)
+                                            textSize = edit.fontSize * size.width / 595f
+                                        }
+                                        drawContext.canvas.nativeCanvas.drawText(edit.text.replace('\n', ' '), edit.x * size.width, edit.y * size.height, paint)
+                                    } else drawMarkup(edit.kind, edit.x, edit.y, edit.width, edit.height)
+                                }
+                                val a = first
+                                if (a != null) {
+                                    if (mode == PdfOperations.EditKind.TEXT) {
+                                        drawCircle(Purple, radius = 6.dp.toPx(), center = Offset(a.x * size.width, a.y * size.height))
+                                    } else {
+                                        val b = last ?: a
+                                        val x = min(a.x, b.x); val y = min(a.y, b.y)
+                                        val w = abs(a.x - b.x); val h = abs(a.y - b.y)
+                                        drawMarkup(mode, x, y, w, h)
+                                        drawRect(Purple, Offset(x * size.width, y * size.height), androidx.compose.ui.geometry.Size(w * size.width, h * size.height), style = Stroke(width = 2.dp.toPx()))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (mode == PdfOperations.EditKind.TEXT) {
+                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
+                        Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex) }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()), modifier = Modifier.weight(1f)) { Text("Añadir a página") }
+                }
+            }
         }
     }
 }
