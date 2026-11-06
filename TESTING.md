@@ -9,10 +9,12 @@ Usar **copias de archivos de prueba**, nunca originales únicos ni documentos se
 - [ ] Convertir dos JPG a PDF y comprobar orden, márgenes y nitidez.
 - [ ] Convertir TXT y DOCX sencillo; revisar saltos de línea y acentos (el diseño de Word no se conserva necesariamente).
 - [ ] Unir dos PDF de diferentes tamaños y verificar todas las páginas.
-- [ ] Extraer páginas 2 a 4, rotar y reorganizar (orden `3,1,2,2`); comprobar que el original no cambie.
-- [ ] Agregar texto a una página; comprobar posición y si se puede seleccionar en otro lector.
+- [ ] Extraer páginas 2 a 4, rotar y reorganizar con miniaturas (mover, duplicar y quitar); comprobar que el original no cambie.
+- [ ] Agregar texto a una página; cambiar el tamaño en la vista previa y comprobar posición y selección en otro lector.
+- [ ] En una sola sesión, añadir texto, dos imágenes y un resaltado en páginas distintas; guardar una sola vez y revisar todos los cambios.
+- [ ] Aplicar un cambio y luego pulsar «Reeditar último cambio» para moverlo y ajustar su tamaño antes de volver a aplicarlo.
 - [ ] Agregar imagen PNG transparente; comprobar color, tamaño y transparencia.
-- [ ] Dibujar firma; comprobar trazos, ubicación y nitidez.
+- [ ] Dibujar firma, elegir posición y tamaño desde el editor visual; comprobar trazos, ubicación y nitidez.
 - [ ] Resaltar, subrayar y tachar en copias; comprobar posición y opacidad.
 - [ ] Reconocer texto mediante OCR en una página escaneada, copiarlo y compararlo con el original.
 - [ ] Generar PDF buscable desde un escaneo; buscar una palabra en otro lector.
@@ -27,6 +29,10 @@ Usar **copias de archivos de prueba**, nunca originales únicos ni documentos se
 - [ ] Cancelar el selector de archivo y el diálogo Guardar: la app no debe cerrarse.
 - [ ] Probar PDF protegido, corrupto y sin páginas válidas; debe mostrar error sin cerrar la app.
 - [ ] Girar el teléfono durante la lectura y comprobar que no se pierde el documento.
+- [ ] Girar durante una edición con cambios pendientes; comprobar que se conservan el PDF y las anotaciones.
+- [ ] Abrir y cerrar el teclado mientras se coloca texto; verificar que el punto de inserción no cambia.
+- [ ] Revisar el editor con navegación Android de tres botones y gestos: «Aplicar cambio» y «Guardar PDF» deben permanecer accesibles.
+- [ ] Abrir fotos de cámara de alta resolución y convertirlas sin bloqueo por memoria.
 - [ ] Probar documentos grandes sin agotar memoria (50–100 páginas).
 - [ ] Abrir de nuevo documentos recientes.
 - [ ] Confirmar que ningún resultado sobrescriba el PDF original.
@@ -38,6 +44,7 @@ Usar **copias de archivos de prueba**, nunca originales únicos ni documentos se
 - El OCR puede cometer errores, sobre todo con escaneos borrosos o columnas.
 - La conversión DOCX actual extrae el texto, no conserva tablas y diseños complejos.
 - La compresión rasterizada puede aumentar el tamaño de ciertos PDF y pierde contenido interactivo/texto seleccionable.
-- Falta una interfaz de edición precisa mediante arrastre sobre la página, además de deshacer/rehacer.
+- El editor permite reubicar borradores y reeditar el último cambio de la página, pero todavía no cuenta con selección y transformación libre de todos los objetos existentes.
+- El organizador visual mueve miniaturas mediante botones, no mediante arrastrar y soltar.
 
 Anotar modelo de celular, versión de Android, función, resultado esperado, resultado real y captura si hay un problema.
