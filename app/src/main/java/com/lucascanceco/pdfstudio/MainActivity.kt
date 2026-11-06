@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -28,10 +29,21 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onSizeChanged
+import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.max
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -220,21 +232,18 @@ private fun PdfStudioApp(initialUri: Uri?) {
             }) { Text("Extraer") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
         if (selectedTool == Tool.TEXT && current != null) {
-            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Agregar texto — página ${page + 1}") }, text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = insertText, onValueChange = { insertText = it.take(1000) }, label = { Text("Texto a insertar") })
-                    Text("Tamaño: ${textSize.toInt()} pt")
-                    Slider(value = textSize, onValueChange = { textSize = it }, valueRange = 6f..72f)
-                    Text("Posición horizontal: ${(textX * 100).toInt()} %")
-                    Slider(value = textX, onValueChange = { textX = it }, valueRange = 0f..0.9f)
-                    Text("Posición vertical: ${(textY * 100).toInt()} %")
-                    Slider(value = textY, onValueChange = { textY = it }, valueRange = .05f..1f)
-                    Text("Se guarda una copia; el documento original no cambia.", style = MaterialTheme.typography.bodySmall)
+            val source = current!!
+            val targetPage = page
+            PlacementEditor(
+                uri = source,
+                page = targetPage,
+                isText = true,
+                onDismiss = { selectedTool = null },
+                onSave = { x, y, _, _, value, size, _ ->
+                    perform { ops.addText(source, targetPage, value, x, y, size) }
+                    selectedTool = null
                 }
-            }, confirmButton = { TextButton(onClick = {
-                if (insertText.isNotBlank()) perform { ops.addText(current!!, page, insertText, textX, textY, textSize) }
-                selectedTool = null
-            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+            )
         }
         if (selectedTool == Tool.PAGES && current != null) {
             AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Organizar páginas") }, text = {
@@ -370,32 +379,137 @@ private fun PdfStudioApp(initialUri: Uri?) {
             }) { Text("Crear copia compacta") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
         }
         if (selectedTool == Tool.MARKUP && current != null) {
-            AlertDialog(onDismissRequest = { selectedTool = null }, title = { Text("Marcar página ${page + 1}") }, text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Tipo de marca")
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        PdfOperations.Markup.entries.forEachIndexed { index, value ->
-                            SegmentedButton(selected = markupMode == value, onClick = { markupMode = value }, shape = SegmentedButtonDefaults.itemShape(index = index, count = 3)) {
-                                Text(when (value) { PdfOperations.Markup.HIGHLIGHT -> "Resaltar"; PdfOperations.Markup.UNDERLINE -> "Subrayar"; PdfOperations.Markup.STRIKEOUT -> "Tachar" }, style = MaterialTheme.typography.labelSmall)
+            val source = current!!
+            val targetPage = page
+            PlacementEditor(
+                uri = source,
+                page = targetPage,
+                isText = false,
+                onDismiss = { selectedTool = null },
+                onSave = { x, y, w, h, _, _, mode ->
+                    perform { ops.markup(source, targetPage, x, y, w, h, mode) }
+                    selectedTool = null
+                }
+            )
+        }
+    }
+}
+
+/** Full-page WYSIWYG placement: gesture coordinates come from the actual rendered page bounds. */
+@Composable
+private fun PlacementEditor(
+    uri: Uri,
+    page: Int,
+    isText: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (Float, Float, Float, Float, String, Float, PdfOperations.Markup) -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val ops = remember { PdfOperations(context) }
+    var bitmap by remember(uri, page) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var position by remember { mutableStateOf<Offset?>(null) }
+    var dragEnd by remember { mutableStateOf<Offset?>(null) }
+    var pageSize by remember { mutableStateOf(IntSize.Zero) }
+    var value by remember { mutableStateOf("") }
+    var fontSize by remember { mutableFloatStateOf(16f) }
+    var mark by remember { mutableStateOf(PdfOperations.Markup.HIGHLIGHT) }
+
+    LaunchedEffect(uri, page) {
+        bitmap = try { ops.renderPage(uri, page, 1200) } catch (_: Exception) { null }
+    }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = Back) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
+                    Text(if (isText) "Colocar texto · Página ${page + 1}" else "Marcar · Página ${page + 1}", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                }
+                Text(if (isText) "Tocá la página en el punto exacto donde querés escribir." else "Arrastrá el dedo para seleccionar la zona. Podés repetir el gesto para corregir.", style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(8.dp))
+                BoxWithConstraints(Modifier.fillMaxWidth().weight(1f).background(Color(0xFFE9E8F1), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+                    val image = bitmap
+                    if (image == null) CircularProgressIndicator()
+                    else {
+                        val ratio = image.width.toFloat() / image.height
+                        val drawWidth = if (maxWidth / ratio <= maxHeight) maxWidth else maxHeight * ratio
+                        val drawHeight = drawWidth / ratio
+                        val gestures = if (isText) {
+                            Modifier.pointerInput(uri, page) {
+                                detectTapGestures { tap ->
+                                    position = tap
+                                    dragEnd = null
+                                }
+                            }
+                        } else {
+                            Modifier.pointerInput(uri, page) {
+                                detectDragGestures(
+                                    onDragStart = { position = it; dragEnd = it },
+                                    onDragEnd = {}, onDragCancel = { position = null; dragEnd = null }
+                                ) { change, _ ->
+                                    dragEnd = change.position
+                                    change.consume()
+                                }
+                            }
+                        }
+                        Box(Modifier.size(drawWidth, drawHeight).clip(RoundedCornerShape(3.dp)).onSizeChanged { pageSize = it }) {
+                            Image(image.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds)
+                            Canvas(Modifier.fillMaxSize().then(gestures)) {
+                                val first = position
+                                if (first != null) {
+                                    if (isText) {
+                                        drawCircle(Purple, radius = 7.dp.toPx(), center = first)
+                                        drawLine(Purple, first.copy(x = first.x - 12.dp.toPx()), first.copy(x = first.x + 12.dp.toPx()), strokeWidth = 2.dp.toPx())
+                                        drawLine(Purple, first.copy(y = first.y - 12.dp.toPx()), first.copy(y = first.y + 12.dp.toPx()), strokeWidth = 2.dp.toPx())
+                                    } else {
+                                        val second = dragEnd ?: first
+                                        val left = min(first.x, second.x)
+                                        val top = min(first.y, second.y)
+                                        val w = abs(second.x - first.x)
+                                        val h = abs(second.y - first.y)
+                                        drawRect(Color(0xFFFFD32D), topLeft = Offset(left, top), size = androidx.compose.ui.geometry.Size(w, h), alpha = .35f)
+                                        drawRect(Purple, topLeft = Offset(left, top), size = androidx.compose.ui.geometry.Size(w, h), style = Stroke(width = 2.dp.toPx()))
+                                    }
+                                }
                             }
                         }
                     }
-                    Text("Posición horizontal ${(markupX * 100).toInt()} %")
-                    Slider(markupX, { markupX = it }, valueRange = 0f..0.9f)
-                    Text("Posición vertical ${(markupY * 100).toInt()} %")
-                    Slider(markupY, { markupY = it }, valueRange = .02f..0.95f)
-                    Text("Ancho ${(markupW * 100).toInt()} %")
-                    Slider(markupW, { markupW = it }, valueRange = .05f..0.95f)
-                    Text("Alto ${(markupH * 100).toInt()} %")
-                    Slider(markupH, { markupH = it }, valueRange = .005f..0.12f)
                 }
-            }, confirmButton = { TextButton(onClick = {
-                val chosen = current!!
-                val mark = markupMode
-                val x = markupX; val y = markupY; val w = markupW; val h = markupH
-                perform { ops.markup(chosen, page, x, y, w, h, mark) }
-                selectedTool = null
-            }) { Text("Guardar copia") } }, dismissButton = { TextButton(onClick = { selectedTool = null }) { Text("Cancelar") } })
+                Spacer(Modifier.height(8.dp))
+                if (isText) {
+                    OutlinedTextField(value, { value = it.take(1000) }, label = { Text("Texto") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${fontSize.toInt()} pt", modifier = Modifier.width(55.dp))
+                        Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
+                    }
+                } else {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        PdfOperations.Markup.entries.forEachIndexed { index, mode ->
+                            SegmentedButton(selected = mark == mode, onClick = { mark = mode }, shape = SegmentedButtonDefaults.itemShape(index, 3)) {
+                                Text(when (mode) { PdfOperations.Markup.HIGHLIGHT -> "Resaltar"; PdfOperations.Markup.UNDERLINE -> "Subrayar"; PdfOperations.Markup.STRIKEOUT -> "Tachar" }, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { position = null; dragEnd = null }, modifier = Modifier.weight(1f)) { Text("Reubicar") }
+                    Button(onClick = {
+                        val a = position ?: return@Button
+                        if (pageSize.width == 0 || pageSize.height == 0) return@Button
+                        val b = dragEnd ?: a
+                        val left = if (isText) a.x else min(a.x, b.x)
+                        val top = if (isText) a.y else min(a.y, b.y)
+                        val width = if (isText) 0f else abs(b.x - a.x)
+                        val height = if (isText) 0f else abs(b.y - a.y)
+                        onSave(
+                            (left / pageSize.width).coerceIn(0f, 1f),
+                            (top / pageSize.height).coerceIn(0f, 1f),
+                            (width / pageSize.width).coerceIn(.02f, 1f),
+                            (height / pageSize.height).coerceIn(.005f, 1f),
+                            value, fontSize, mark
+                        )
+                    }, enabled = position != null && (if (isText) value.isNotBlank() else dragEnd != null && abs(dragEnd!!.x - position!!.x) > 10f), modifier = Modifier.weight(1f)) { Text("Guardar copia") }
+                }
+            }
         }
     }
 }
