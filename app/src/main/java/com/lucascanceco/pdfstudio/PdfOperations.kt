@@ -13,6 +13,9 @@ import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
+import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream.AppendMode
+import com.tom_roush.pdfbox.util.Matrix
 import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +95,73 @@ class PdfOperations(private val context: Context) {
         try {
             PDDocument.load(source).use { doc ->
                 doc.pages.forEach { it.rotation = (it.rotation + 90 * quarterTurns) % 360 }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    /** Page indices are zero-based, in the desired final order. Duplicates are allowed. */
+    suspend fun reorder(uri: Uri, indices: List<Int>): File = withContext(Dispatchers.IO) {
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_pages_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { input ->
+                require(indices.isNotEmpty() && indices.all { it in 0 until input.numberOfPages })
+                PDDocument().use { doc ->
+                    indices.forEach { doc.importPage(input.getPage(it)) }
+                    doc.save(output)
+                }
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    /** Adds selectable text without rasterizing the original page. Coordinates are relative to visible page, top-left origin. */
+    suspend fun addText(uri: Uri, pageIndex: Int, value: String, xFraction: Float, yFraction: Float, size: Float): File = withContext(Dispatchers.IO) {
+        require(value.isNotBlank() && value.length <= 1000 && size in 6f..72f)
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_text_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                val page = doc.getPage(pageIndex)
+                val box = page.cropBox ?: page.mediaBox
+                val x = box.lowerLeftX + box.width * xFraction.coerceIn(0f, 1f)
+                val y = box.lowerLeftY + box.height * (1f - yFraction.coerceIn(0f, 1f))
+                val safeText = value.replace('\n', ' ').map { if (it.code in 32..255) it else '?' }.joinToString("")
+                PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                    stream.beginText()
+                    stream.setFont(PDType1Font.HELVETICA, size)
+                    stream.setNonStrokingColor(28, 28, 40)
+                    stream.newLineAtOffset(x, y)
+                    stream.showText(safeText)
+                    stream.endText()
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    /** Stamps a locally chosen image with its alpha channel preserved. */
+    suspend fun stampImage(uri: Uri, pageIndex: Int, bitmap: Bitmap, xFraction: Float, yFraction: Float, widthFraction: Float): File = withContext(Dispatchers.IO) {
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_stamp_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                val page = doc.getPage(pageIndex)
+                val box = page.cropBox ?: page.mediaBox
+                val w = box.width * widthFraction.coerceIn(.05f, 1f)
+                val h = w * bitmap.height / bitmap.width
+                val x = box.lowerLeftX + box.width * xFraction.coerceIn(0f, 1f)
+                val y = box.lowerLeftY + box.height * (1f - yFraction.coerceIn(0f, 1f)) - h
+                val image = LosslessFactory.createFromImage(doc, bitmap)
+                PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                    stream.drawImage(image, x, y, w, h)
+                }
                 doc.save(output)
             }
             output
