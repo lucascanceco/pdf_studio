@@ -4,7 +4,9 @@ Aplicación Android nativa para visualizar y manipular PDF sin conexión. Inspir
 
 ## Estado real
 
-**0.1.0 — código fuente inicial, aún no compilado en un Android SDK.** Incluye lector PDF por páginas con zoom, recientes, creación desde imágenes, unión, extracción de páginas y rotación. No están implementadas todavía la edición del texto original, OCR, compresión ni Word a PDF. No se deben presentar como terminadas.
+**0.2.0-beta — compila con GitHub Actions, pendiente de pruebas funcionales extensivas en un teléfono.** Incluye visor con zoom, búsqueda, archivos recientes, creación desde imágenes/TXT/DOCX textual, unión, extracción, rotación, reorganización de páginas, texto e imágenes superpuestos, firma, OCR offline, copia PDF buscable, protección por contraseña, marcas visuales y compresión rasterizada opcional.
+
+La edición de texto/objetos originales de PDF arbitrarios, la conservación de maquetación Word compleja, el reconocimiento perfecto de escaneos y el sistema completo de deshacer/rehacer **no están resueltos**. La función de marca visual **no es censura segura**. Consultar [TESTING.md](TESTING.md) para pruebas y limitaciones.
 
 ## Requisitos
 
@@ -23,15 +25,11 @@ La app no solicita permiso `INTERNET`. Los archivos se eligen con el selector de
 
 ## Próximas etapas
 
-1. Editor de anotaciones, firmas y marcas de agua.
-2. Escáner y OCR local con modelo incluido.
-3. Edición estructural avanzada, prototipo y matriz de compatibilidad.
-4. Procesamiento por lotes, protección y compresión verificable.
+1. Pruebas reales en Android, mejoras del editor visual y colocación de elementos mediante arrastre.
+2. Escáner con cámara y corrección de perspectiva.
+3. Edición estructural avanzada: validar alcance y motor para modificar objetos originales.
+4. Deshacer/rehacer y conversión de formatos con mayor fidelidad.
 
 ## Diseño de logo
 
 Hoja blanca con esquina doblada y tres trazos sobre un fondo violeta. Vectorial, escalable y sin imágenes rasterizadas.
-
-## Estado del editor (sin validar en APK)
-
-Se incorporaron código para texto e imágenes, firma, organización de páginas, OCR offline, contraseña y marca de agua. Requieren compilación y pruebas antes de una versión instalable. La edición directa de elementos de texto preexistentes, la conversión DOCX de alta fidelidad y la compresión optimizada aún no están disponibles.
