@@ -118,6 +118,15 @@ private fun PdfStudioApp(initialUri: Uri?) {
             page = 0
             extractEnd = count.toString()
             rememberUri(uri)
+            if (selectedTool == Tool.OCR) {
+                selectedTool = null
+                ocrResult = try {
+                    ocr.recognize(uri, 0).ifBlank { "No se reconoció texto en la primera página." }
+                } catch (e: Exception) {
+                    snackbar.showSnackbar("No se pudo reconocer texto: ${e.message ?: "Error de OCR"}")
+                    null
+                }
+            }
         } catch (e: Exception) {
             current = null
             snackbar.showSnackbar("No se pudo abrir: ${e.message ?: "PDF incompatible"}")
@@ -140,7 +149,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
         if (uri != null) {
             try { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } catch (_: SecurityException) {}
             current = uri
-        }
+        } else if (current == null) selectedTool = null
     }
     val manyPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { files ->
         if (files.isNotEmpty()) perform { ops.merge(files) }
@@ -862,12 +871,12 @@ private fun HomeScreen(recent: List<String>, open: () -> Unit, action: (Tool) ->
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ToolCard("Extraer", Icons.Default.ContentCut, Pastels[3], Modifier.weight(1f), enabled = false) {}
+                    ToolCard("Extraer", Icons.Default.ContentCut, Pastels[3], Modifier.weight(1f)) { action(Tool.EXTRACT) }
                     ToolCard("TXT / Word", Icons.Default.Article, Pastels[4], Modifier.weight(1f)) { action(Tool.DOCUMENT) }
-                    ToolCard("OCR", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f), enabled = false) {}
+                    ToolCard("OCR", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f)) { action(Tool.OCR) }
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("Para editar, extraer, rotar u organizar páginas, abrí un PDF. Las herramientas en gris se habilitan desde el visor o llegarán en próximas versiones.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                Text("Elegí una acción. Si necesita un documento, te pediremos que abras el PDF. Para más herramientas, entrá al visor.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
             }
         }
         item { Text("Documentos recientes", Modifier.padding(start = 22.dp, top = 8.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
