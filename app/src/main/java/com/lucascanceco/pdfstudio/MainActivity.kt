@@ -273,13 +273,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
     MaterialTheme(colorScheme = scheme) {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbar) },
-            bottomBar = {
-                if (current == null) NavigationBar(containerColor = Color.White) {
-                    NavigationBarItem(selected = current == null, onClick = { current = null }, icon = { Icon(Icons.Default.Home, null) }, label = { Text("Inicio") })
-                    NavigationBarItem(selected = current != null, onClick = { openPdf.launch(arrayOf("application/pdf")) }, icon = { Icon(Icons.Default.FolderOpen, null) }, label = { Text("Abrir") })
-                    NavigationBarItem(selected = false, onClick = { images.launch(arrayOf("image/*")) }, icon = { Icon(Icons.Default.AddCircle, null) }, label = { Text("Crear") })
-                }
-            }
+            bottomBar = {}
         ) { pad ->
             Box(Modifier.fillMaxSize().padding(pad).background(Back)) {
                 if (current == null) {
