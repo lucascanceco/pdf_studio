@@ -15,7 +15,8 @@ import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream.AppendMode
-import com.tom_roush.pdfbox.util.Matrix
+import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
+import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import java.io.File
 import java.io.FileOutputStream
 import kotlinx.coroutines.Dispatchers
@@ -161,6 +162,48 @@ class PdfOperations(private val context: Context) {
                 val image = LosslessFactory.createFromImage(doc, bitmap)
                 PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
                     stream.drawImage(image, x, y, w, h)
+                }
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    suspend fun passwordProtect(uri: Uri, password: String): File = withContext(Dispatchers.IO) {
+        require(password.length in 4..64) { "La contraseña debe tener entre 4 y 64 caracteres" }
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_protected_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                val permissions = AccessPermission()
+                val policy = StandardProtectionPolicy(password, password, permissions)
+                policy.encryptionKeyLength = 128
+                doc.protect(policy)
+                doc.save(output)
+            }
+            output
+        } catch (e: Exception) { output.delete(); throw e }
+        finally { source.delete() }
+    }
+
+    suspend fun addWatermark(uri: Uri, watermark: String): File = withContext(Dispatchers.IO) {
+        require(watermark.isNotBlank() && watermark.length <= 80)
+        val source = copyToTemp(uri, ".pdf")
+        val output = File.createTempFile("pdfstudio_watermark_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(source).use { doc ->
+                doc.pages.forEach { page ->
+                    val box = page.cropBox ?: page.mediaBox
+                    val safe = watermark.map { if (it.code in 32..126) it else '?' }.joinToString("")
+                    PDPageContentStream(doc, page, AppendMode.APPEND, true, true).use { stream ->
+                        stream.beginText()
+                        stream.setFont(PDType1Font.HELVETICA_BOLD, 28f)
+                        stream.setNonStrokingColor(180, 180, 190)
+                        stream.newLineAtOffset(box.lowerLeftX + box.width * .12f, box.lowerLeftY + box.height * .5f)
+                        stream.showText(safe)
+                        stream.endText()
+                    }
                 }
                 doc.save(output)
             }
