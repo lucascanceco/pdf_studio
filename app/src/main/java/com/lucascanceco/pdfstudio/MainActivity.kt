@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -67,12 +68,12 @@ private val Back = Color(0xFFF7F6FB)
 private val Pastels = listOf(Color(0xFFE5DFFF), Color(0xFFFFE1EB), Color(0xFFDFF5EC), Color(0xFFFFEAD9), Color(0xFFE3F2FC), Color(0xFFFFEDD1))
 
 /** A bounded decode prevents large phone photos from exhausting the editor's memory. */
-private fun decodeEditableImage(context: android.content.Context, uri: Uri): android.graphics.Bitmap? {
+private fun decodeEditableImage(context: android.content.Context, uri: Uri, maxDimension: Int = 2400): android.graphics.Bitmap? {
     val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
     context.contentResolver.openInputStream(uri).use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
     var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2400) sample *= 2
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maxDimension) sample *= 2
     return context.contentResolver.openInputStream(uri).use {
         android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
     }
@@ -347,14 +348,16 @@ private fun PdfStudioApp(initialUri: Uri?) {
                 startWithText = selectedTool == Tool.TEXT,
                 initialImage = imageToPlace,
                 initialEdits = resumedDraft?.takeIf { it.document == source }?.edits ?: emptyList(),
+                initialPending = resumedDraft?.takeIf { it.document == source }?.pending,
                 onDismiss = { selectedTool = null; imageToPlace = null; resumedDraft = null },
-                onKeepDraft = { edits, draftPage ->
+                onKeepDraft = { edits, active, draftPage ->
                     scope.launch {
                         busy = true
                         try {
-                            draftStore.save(source, fileNameFor(context, source), draftPage, edits)
+                            draftStore.save(source, fileNameFor(context, source), draftPage, edits, active)
                             availableDraft = draftStore.metadata()
                             edits.mapNotNull { it.image }.distinct().forEach { it.recycle() }
+                            active.image?.takeUnless { it.isRecycled }?.recycle()
                             resumedDraft = null; selectedTool = null; imageToPlace = null
                             snackbar.showSnackbar("Borrador guardado en este teléfono")
                         } catch (e: Exception) {
@@ -638,8 +641,9 @@ private fun BatchEditor(
     startWithText: Boolean,
     initialImage: android.graphics.Bitmap?,
     initialEdits: List<PdfOperations.EditOperation>,
+    initialPending: EditorDraftStore.Pending?,
     onDismiss: () -> Unit,
-    onKeepDraft: (List<PdfOperations.EditOperation>, Int) -> Unit,
+    onKeepDraft: (List<PdfOperations.EditOperation>, EditorDraftStore.Pending, Int) -> Unit,
     onSave: (List<PdfOperations.EditOperation>) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -648,13 +652,13 @@ private fun BatchEditor(
     val edits = remember { mutableStateListOf<PdfOperations.EditOperation>().apply { addAll(initialEdits) } }
     var page by remember { mutableIntStateOf(initialPage) }
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var mode by remember { mutableStateOf(if (initialImage != null) PdfOperations.EditKind.IMAGE else if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
-    var imageToAdd by remember { mutableStateOf(initialImage) }
-    var imageWidth by remember { mutableFloatStateOf(.45f) }
-    var textToAdd by remember { mutableStateOf("") }
-    var fontSize by remember { mutableFloatStateOf(16f) }
-    var first by remember { mutableStateOf<Offset?>(null) }
-    var last by remember { mutableStateOf<Offset?>(null) }
+    var mode by remember { mutableStateOf(initialPending?.mode ?: if (initialImage != null) PdfOperations.EditKind.IMAGE else if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
+    var imageToAdd by remember { mutableStateOf(initialPending?.image ?: initialImage) }
+    var imageWidth by remember { mutableFloatStateOf(initialPending?.imageWidth ?: .45f) }
+    var textToAdd by remember { mutableStateOf(initialPending?.text ?: "") }
+    var fontSize by remember { mutableFloatStateOf(initialPending?.fontSize ?: 16f) }
+    var first by remember { mutableStateOf(initialPending?.let { p -> if (p.x != null && p.y != null) Offset(p.x, p.y) else null }) }
+    var last by remember { mutableStateOf(initialPending?.let { p -> if (p.lastX != null && p.lastY != null) Offset(p.lastX, p.lastY) else null }) }
     var renderError by remember { mutableStateOf(false) }
     var confirmExit by remember { mutableStateOf(false) }
     var validationMessage by remember { mutableStateOf<String?>(null) }
@@ -677,7 +681,7 @@ private fun BatchEditor(
         bitmap = null
         renderError = false
         bitmap = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { renderError = true; null }
-        first = null; last = null
+        if (initialPending == null || page != initialPage) { first = null; last = null }
         selectedEdit = -1
     }
     val selectionReady = first != null && (mode == PdfOperations.EditKind.TEXT || mode == PdfOperations.EditKind.IMAGE || (last != null && abs(last!!.x - first!!.x) > .01f))
@@ -996,7 +1000,11 @@ private fun BatchEditor(
             onDismissRequest = { confirmExit = false },
             title = { Text("Cambios sin guardar") },
             text = { Text("Podés seguir editando, conservar un borrador privado para retomarlo o descartar los cambios.") },
-            confirmButton = { TextButton(onClick = { confirmExit = false; currentSession()?.let { onKeepDraft(it, page) } }) { Text("Guardar borrador") } },
+            confirmButton = { TextButton(onClick = {
+                confirmExit = false
+                onKeepDraft(edits.toList(), EditorDraftStore.Pending(mode, textToAdd, first?.x, first?.y,
+                    last?.x, last?.y, fontSize, imageWidth, imageToAdd), page)
+            }) { Text("Guardar borrador") } },
             dismissButton = {
                 Row {
                     TextButton(onClick = { confirmExit = false }) { Text("Seguir editando") }
@@ -1012,6 +1020,10 @@ private fun BatchEditor(
 private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSave: (List<Int>) -> Unit) {
     val order = remember(uri, pageCount) { mutableStateListOf<Int>().apply { addAll(0 until pageCount) } }
     var selected by remember { mutableIntStateOf(0) }
+    var destination by remember { mutableStateOf("") }
+    var showMoveDialog by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    val scrollScope = rememberCoroutineScope()
     fun swap(a: Int, b: Int) {
         if (a in order.indices && b in order.indices) {
             val item = order[a]; order[a] = order[b]; order[b] = item
@@ -1032,9 +1044,10 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                     IconButton(onClick = { swap(selected, selected + 1) }, enabled = selected + 1 < order.size) { Icon(Icons.Default.ArrowForward, "Mover derecha") }
                     TextButton(onClick = { if (selected in order.indices) { order.add(selected + 1, order[selected]); selected++ } }, enabled = order.isNotEmpty()) { Text("Duplicar") }
                     TextButton(onClick = { if (order.size > 1 && selected in order.indices) { order.removeAt(selected); selected = selected.coerceAtMost(order.lastIndex) } }, enabled = order.size > 1) { Text("Eliminar") }
+                    TextButton(onClick = { destination = (selected + 1).toString(); showMoveDialog = true }, enabled = order.isNotEmpty()) { Text("Mover a posición…") }
                 }
                 Text("${order.size} páginas en la copia", color = Purple, style = MaterialTheme.typography.labelMedium)
-                LazyRow(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
+                LazyRow(Modifier.fillMaxWidth().weight(1f), state = listState, horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 18.dp)) {
                     items(order.size) { index ->
                         Column(
                             Modifier.width(138.dp)
@@ -1042,14 +1055,23 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                                 .clickable { selected = index }
                                 .pointerInput(index, order.size) {
                                     var dragged = 0f
-                                    var moved = false
+                                    var draggedIndex = index
                                     detectDragGesturesAfterLongPress(
-                                        onDragStart = { selected = index; dragged = 0f; moved = false }
+                                        onDragStart = { selected = index; draggedIndex = index; dragged = 0f }
                                     ) { change, movement ->
                                         dragged += movement.x
-                                        if (!moved && abs(dragged) > 54.dp.toPx()) {
-                                            swap(index, index + if (dragged > 0f) 1 else -1)
-                                            moved = true
+                                        val step = 148.dp.toPx()
+                                        while (abs(dragged) >= step && draggedIndex in order.indices) {
+                                            val next = draggedIndex + if (dragged > 0f) 1 else -1
+                                            if (next !in order.indices) break
+                                            swap(draggedIndex, next)
+                                            draggedIndex = next
+                                            dragged += if (dragged > 0f) -step else step
+                                            val first = listState.firstVisibleItemIndex
+                                            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: first
+                                            if (draggedIndex >= last - 1 || draggedIndex <= first + 1) {
+                                                scrollScope.launch { listState.animateScrollToItem(draggedIndex.coerceIn(0, order.lastIndex)) }
+                                            }
                                         }
                                         change.consume()
                                     }
@@ -1068,6 +1090,20 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
             }
         }
     }
+    if (showMoveDialog) AlertDialog(onDismissRequest = { showMoveDialog = false },
+        title = { Text("Mover página a posición") },
+        text = { OutlinedTextField(destination, { destination = it.filter(Char::isDigit) }, label = { Text("Posición (1 a ${order.size})") }, singleLine = true) },
+        confirmButton = { TextButton(onClick = {
+            val target = destination.toIntOrNull()?.minus(1)
+            if (target != null && target in order.indices && selected in order.indices) {
+                val item = order.removeAt(selected)
+                order.add(target, item)
+                selected = target
+                scrollScope.launch { listState.animateScrollToItem(target) }
+                showMoveDialog = false
+            }
+        }) { Text("Mover") } },
+        dismissButton = { TextButton(onClick = { showMoveDialog = false }) { Text("Cancelar") } })
 }
 
 @Composable
@@ -1516,7 +1552,7 @@ private fun PhotoOrderPreview(files: List<Uri>, suggestedPattern: String, onDism
             OutlinedTextField(pattern, { pattern = it.take(60) }, label = { Text("Patrón del archivo") }, modifier = Modifier.fillMaxWidth())
             order.forEachIndexed { index, uri ->
                 var thumb by remember(uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
-                LaunchedEffect(uri) { thumb = try { decodeEditableImage(context, uri) } catch (_: Exception) { null } }
+                LaunchedEffect(uri) { thumb = try { decodeEditableImage(context, uri, 260) } catch (_: Exception) { null } }
                 Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     val bitmap = thumb
                     if (bitmap != null) Image(bitmap.asImageBitmap(), "Foto ${index + 1}", Modifier.size(50.dp, 65.dp), contentScale = ContentScale.Fit)
