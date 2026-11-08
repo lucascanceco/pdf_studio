@@ -19,6 +19,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -61,11 +64,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import java.io.File
+import com.lucascanceco.pdfstudio.ui.theme.PdfStudioTheme
+import com.lucascanceco.pdfstudio.ui.theme.PastelCards
+import com.lucascanceco.pdfstudio.ui.theme.NightBackground
 
-private val Purple = Color(0xFF6355D9)
-private val Ink = Color(0xFF242334)
-private val Back = Color(0xFFF7F6FB)
-private val Pastels = listOf(Color(0xFFE5DFFF), Color(0xFFFFE1EB), Color(0xFFDFF5EC), Color(0xFFFFEAD9), Color(0xFFE3F2FC), Color(0xFFFFEDD1))
+private val Purple = Color(0xFF1A5F7A) // Legacy alias for existing editor accents.
+private val Ink = Color(0xFF182F3C)
+private val Back = Color(0xFFF5F5F5)
 
 /** A bounded decode prevents large phone photos from exhausting the editor's memory. */
 private fun decodeEditableImage(context: android.content.Context, uri: Uri, maxDimension: Int = 2400): android.graphics.Bitmap? {
@@ -269,13 +274,15 @@ private fun PdfStudioApp(initialUri: Uri?) {
         if (pending != null) save.launch(suggestedCopyName(pendingSourceName ?: current?.let { fileNameFor(context, it) } ?: "PDFStudio", pendingOperation))
     }
 
-    val scheme = lightColorScheme(primary = Purple, background = Back, surface = Color.White, onSurface = Ink)
-    MaterialTheme(colorScheme = scheme) {
+    var isDarkMode by rememberSaveable {
+        mutableStateOf(context.getSharedPreferences("appearance", 0).getBoolean("dark_mode", false))
+    }
+    PdfStudioTheme(darkTheme = isDarkMode) {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbar) },
             bottomBar = {}
         ) { pad ->
-            Box(Modifier.fillMaxSize().padding(pad).background(Back)) {
+            Box(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background)) {
                 if (current == null) {
                     HomeScreen(recent, availableDraft, deliveryPattern, { openPdf.launch(arrayOf("application/pdf")) }, { tool ->
                         selectedTool = tool
@@ -293,7 +300,10 @@ private fun PdfStudioApp(initialUri: Uri?) {
                             selectedTool = Tool.TEXT
                             current = restored.document
                         }
-                    }, { images.launch(arrayOf("image/*")) })
+                    }, { images.launch(arrayOf("image/*")) }, isDarkMode, {
+                        isDarkMode = !isDarkMode
+                        context.getSharedPreferences("appearance", 0).edit().putBoolean("dark_mode", isDarkMode).apply()
+                    })
                 } else {
                     ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onSearch = { searchOpen = true }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform("rotado") { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onOriginal = { selectedTool = Tool.ORIGINAL }, onPages = {
                         pageSequence = (1..count).joinToString(",")
@@ -641,6 +651,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
 
 /** Non-destructive edit session. All positions are page-relative, not screen-relative. */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun BatchEditor(
     uri: Uri,
     initialPage: Int,
@@ -656,6 +667,7 @@ private fun BatchEditor(
     val context = androidx.compose.ui.platform.LocalContext.current
     val operations = remember { PdfOperations(context) }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val imeVisible = WindowInsets.isImeVisible
     var history by remember { mutableStateOf(EditHistory(current = initialEdits.toList())) }
     val edits = history.current
     var showSecurityWarning by remember { mutableStateOf(false) }
@@ -762,8 +774,8 @@ private fun BatchEditor(
     }
 
     Dialog(onDismissRequest = ::askToExit, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = Back) {
-            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = if (imeVisible) 2.dp else 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::askToExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
                     Column(Modifier.weight(1f)) {
@@ -778,7 +790,7 @@ private fun BatchEditor(
                     }
                 }
                 validationMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                if (!imeVisible) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { page--; first = null; last = null }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Página anterior") }
                     Text("Página ${page + 1} de $pageCount", fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = { page++; first = null; last = null }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Página siguiente") }
@@ -786,18 +798,27 @@ private fun BatchEditor(
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                     PdfOperations.EditKind.entries.forEachIndexed { index, option ->
                         SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, PdfOperations.EditKind.entries.size)) {
-                            Text(when (option) {
+                            val label = when (option) {
                                 PdfOperations.EditKind.TEXT -> "Texto"
                                 PdfOperations.EditKind.IMAGE -> "Imagen"
                                 PdfOperations.EditKind.HIGHLIGHT -> "Resaltar"
                                 PdfOperations.EditKind.UNDERLINE -> "Subrayar"
                                 PdfOperations.EditKind.STRIKEOUT -> "Tachar"
                                 PdfOperations.EditKind.REDACT -> "Censurar"
-                            }, style = MaterialTheme.typography.labelSmall)
+                            }
+                            if (imeVisible) Icon(when (option) {
+                                PdfOperations.EditKind.TEXT -> Icons.Default.TextFields
+                                PdfOperations.EditKind.IMAGE -> Icons.Default.Image
+                                PdfOperations.EditKind.HIGHLIGHT -> Icons.Default.BorderColor
+                                PdfOperations.EditKind.UNDERLINE -> Icons.Default.FormatUnderlined
+                                PdfOperations.EditKind.STRIKEOUT -> Icons.Default.StrikethroughS
+                                PdfOperations.EditKind.REDACT -> Icons.Default.VisibilityOff
+                            }, contentDescription = label, modifier = Modifier.size(18.dp))
+                            else Text(label, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!imeVisible) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = selectionMode, onClick = { selectionMode = !selectionMode; selectedEdit = -1 }, label = { Text("Seleccionar cambios") })
                     if (selectedEdit in edits.indices) {
                         TextButton(onClick = {
@@ -815,8 +836,9 @@ private fun BatchEditor(
                     }
                 }
                 if (mode == PdfOperations.EditKind.TEXT) {
-                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), maxLines = 2, singleLine = true)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        textStyle = if (imeVisible) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge)
+                    if (!imeVisible) Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
                         Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
                     }
@@ -834,7 +856,7 @@ private fun BatchEditor(
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
                 }
                 val latest = edits.lastOrNull()
-                if (latest != null && latest.pageIndex == page) {
+                if (!imeVisible && latest != null && latest.pageIndex == page) {
                     TextButton(onClick = {
                         val edit = edits.last()
                         history = history.remove(edits.lastIndex)
@@ -851,7 +873,7 @@ private fun BatchEditor(
                         }
                     }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text("Reeditar último cambio de esta página") }
                 }
-                Text(when (mode) {
+                if (!imeVisible) Text(when (mode) {
                     PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
                     PdfOperations.EditKind.IMAGE -> "Tocá o arrastrá la imagen para ubicarla y pulsá Aplicar cambio."
                     else -> "Arrastrá para seleccionar la zona y pulsá Aplicar cambio."
@@ -1069,7 +1091,7 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
         }
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1089,7 +1111,7 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                     items(order.size) { index ->
                         Column(
                             Modifier.width(138.dp)
-                                .background(if (selected == index) Color(0xFFE4DEFF) else Color.White, RoundedCornerShape(14.dp))
+                                .background(if (selected == index) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp))
                                 .clickable { selected = index }
                                 .pointerInput(index, order.size) {
                                     var dragged = 0f
@@ -1203,7 +1225,7 @@ private fun ImagePlacementEditor(
         background = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { null }
     }
     Dialog(onDismissRequest = ::closeWithoutSaving, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::closeWithoutSaving) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1331,7 +1353,7 @@ private fun PlacementEditor(
         )
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1418,27 +1440,32 @@ private fun PlacementEditor(
 private fun HomeScreen(
     recent: List<String>, draft: EditorDraftStore.Draft?, deliveryPattern: String, open: () -> Unit,
     action: (Tool) -> Unit, openRecent: (String) -> Unit,
-    resumeDraft: (EditorDraftStore.Draft) -> Unit, repeatDelivery: () -> Unit
+    resumeDraft: (EditorDraftStore.Draft) -> Unit, repeatDelivery: () -> Unit,
+    isDarkMode: Boolean, onToggleTheme: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
-            Box(Modifier.fillMaxWidth().height(160.dp).background(Brush.linearGradient(listOf(Color(0xFF5750C9), Color(0xFF9D8DEC), Color(0xFFFFD5C9))))) {
+            Box(Modifier.fillMaxWidth().height(132.dp).background(MaterialTheme.colorScheme.primary)) {
                 Column(Modifier.padding(20.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Description, null, tint = Color.White, modifier = Modifier.size(30.dp))
+                        Icon(Icons.Default.Description, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(30.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("PDF Studio", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("PDF Studio", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        IconButton(onClick = onToggleTheme) {
+                            Icon(if (isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                if (isDarkMode) "Activar tema claro" else "Activar tema oscuro", tint = MaterialTheme.colorScheme.onPrimary)
+                        }
                     }
-                    Spacer(Modifier.height(14.dp))
-                    Text("Tus documentos, a tu manera.", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text("Todo lo que necesitás, sin conexión.", color = Color.White.copy(alpha = .85f))
+                    Spacer(Modifier.height(6.dp))
+                    Text("Tus documentos, a tu manera.", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Todo lo que necesitás, sin conexión.", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = .9f))
                 }
             }
         }
         if (draft != null) item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 7.dp)
-                .background(Color(0xFFE4DEFF), RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(16.dp))
                 .clickable { resumeDraft(draft) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.EditNote, null, tint = Purple)
                 Spacer(Modifier.width(10.dp))
@@ -1454,7 +1481,7 @@ private fun HomeScreen(
             val uri = Uri.parse(recent.first())
             val lastPage = context.getSharedPreferences("reading", 0).getInt("page_${uri.toString().hashCode()}", 0)
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp)
-                .background(Color.White, RoundedCornerShape(16.dp)).clickable { openRecent(recent.first()) }.padding(10.dp),
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp)).clickable { openRecent(recent.first()) }.padding(10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 PageThumbnail(uri, lastPage, Modifier.size(width = 58.dp, height = 78.dp))
                 Spacer(Modifier.width(12.dp))
@@ -1467,22 +1494,22 @@ private fun HomeScreen(
             }
         }
         item {
-            Column(Modifier.padding(horizontal = 18.dp).offset(y = (-16).dp).background(Color.White, RoundedCornerShape(24.dp)).padding(16.dp)) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(24.dp)).padding(16.dp)) {
                 Text("Acciones rápidas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ToolCard("Abrir PDF", Icons.Default.FolderOpen, Pastels[0], Modifier.weight(1f)) { open() }
-                    ToolCard("Fotos a PDF", Icons.Default.AddPhotoAlternate, Pastels[1], Modifier.weight(1f)) { action(Tool.IMAGES) }
-                    ToolCard("Editar", Icons.Default.Edit, Pastels[2], Modifier.weight(1f)) { action(Tool.TEXT) }
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToolCard("Abrir PDF", Icons.Default.FolderOpen, PastelCards[0], Modifier.weight(1f).fillMaxHeight()) { open() }
+                    ToolCard("Fotos a PDF", Icons.Default.AddPhotoAlternate, PastelCards[1], Modifier.weight(1f).fillMaxHeight()) { action(Tool.IMAGES) }
+                    ToolCard("Editar", Icons.Default.Edit, PastelCards[2], Modifier.weight(1f).fillMaxHeight()) { action(Tool.TEXT) }
                 }
                 Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ToolCard("Unir PDF", Icons.Default.FileCopy, Pastels[3], Modifier.weight(1f)) { action(Tool.MERGE) }
-                    ToolCard("Texto/Word a PDF", Icons.Default.Article, Pastels[4], Modifier.weight(1f)) { action(Tool.DOCUMENT) }
-                    ToolCard("Extraer texto", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f)) { action(Tool.OCR) }
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToolCard("Unir PDF", Icons.Default.FileCopy, PastelCards[3], Modifier.weight(1f).fillMaxHeight()) { action(Tool.MERGE) }
+                    ToolCard("Texto/Word a PDF", Icons.Default.Article, PastelCards[4], Modifier.weight(1f).fillMaxHeight()) { action(Tool.DOCUMENT) }
+                    ToolCard("Extraer texto", Icons.Default.DocumentScanner, PastelCards[5], Modifier.weight(1f).fillMaxHeight()) { action(Tool.OCR) }
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("Elegí una acción. Si necesita un documento, te pediremos que abras el PDF. Para más herramientas, entrá al visor.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                Text("Elegí una acción. Para más herramientas, entrá al visor.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 if (deliveryPattern != "Fotos") {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = repeatDelivery, modifier = Modifier.fillMaxWidth()) {
@@ -1492,13 +1519,13 @@ private fun HomeScreen(
             }
         }
         item { Text("Documentos recientes", Modifier.padding(start = 22.dp, top = 8.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        if (recent.isEmpty()) item { Text("Todavía no hay documentos recientes.", Modifier.padding(horizontal = 22.dp), color = Color.Gray) }
+        if (recent.isEmpty()) item { Text("Todavía no hay documentos recientes.", Modifier.padding(horizontal = 22.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         items(recent) { value ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp).background(Color.White, RoundedCornerShape(16.dp)).clickable { openRecent(value) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp)).clickable { openRecent(value) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFE66A73))
                 Spacer(Modifier.width(12.dp))
                 Text(Uri.parse(value).lastPathSegment ?: "Documento PDF", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Icon(Icons.Default.ChevronRight, null, tint = Color.Gray)
+                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -1506,10 +1533,18 @@ private fun HomeScreen(
 
 @Composable
 private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color, modifier: Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Column(modifier.background(color.copy(alpha = if (enabled) 1f else .4f), RoundedCornerShape(18.dp)).clickable(enabled = enabled, onClick = onClick).padding(vertical = 18.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(icon, null, tint = if (enabled) Purple else Color.LightGray, modifier = Modifier.size(28.dp))
+    val dark = MaterialTheme.colorScheme.background == NightBackground
+    Card(modifier = modifier.heightIn(min = 112.dp).clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = if (dark) MaterialTheme.colorScheme.surfaceVariant else color,
+            contentColor = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C))) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 18.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, modifier = Modifier.size(28.dp))
         Spacer(Modifier.height(8.dp))
-        Text(name, style = MaterialTheme.typography.labelMedium, color = if (enabled) Ink else Color.Gray)
+        Text(name, style = MaterialTheme.typography.labelMedium, color = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C), textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 2)
+    }
     }
 }
 
@@ -1649,7 +1684,7 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
         catch (e: Exception) { renderError = e.message ?: "Archivo incompatible" }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
             Text(fileNameFor(context, uri), modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             IconButton(onClick = onSearch, enabled = !busy) { Icon(Icons.Default.Search, "Buscar texto") }
@@ -1678,12 +1713,12 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                 }.graphicsLayer(scaleX = zoom, scaleY = zoom, translationX = pan.x, translationY = pan.y),
                 contentScale = ContentScale.Fit)
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Anterior") }
             TextButton(onClick = { jumpText = (page + 1).toString(); jumpDialog = true }) { Text("${page + 1} / $count") }
             IconButton(onClick = { onPage(page + 1) }, enabled = page + 1 < count) { Icon(Icons.Default.ChevronRight, "Siguiente") }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface), horizontalArrangement = Arrangement.SpaceEvenly) {
             listOf("Anotar", "Páginas", "Más").forEach { label ->
                 Box {
                     TextButton(onClick = { openMenu = label }) { Text(label, fontWeight = FontWeight.SemiBold) }
