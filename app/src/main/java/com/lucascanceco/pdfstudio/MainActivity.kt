@@ -10,6 +10,7 @@ import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
@@ -19,6 +20,9 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -33,6 +37,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -61,11 +67,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import java.io.File
+import com.lucascanceco.pdfstudio.ui.theme.PdfStudioTheme
+import com.lucascanceco.pdfstudio.ui.theme.PastelCards
+import com.lucascanceco.pdfstudio.ui.theme.NightBackground
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
-private val Purple = Color(0xFF6355D9)
-private val Ink = Color(0xFF242334)
-private val Back = Color(0xFFF7F6FB)
-private val Pastels = listOf(Color(0xFFE5DFFF), Color(0xFFFFE1EB), Color(0xFFDFF5EC), Color(0xFFFFEAD9), Color(0xFFE3F2FC), Color(0xFFFFEDD1))
+private val Purple = Color(0xFF1A5F7A) // Legacy alias for existing editor accents.
+private val Ink = Color(0xFF182F3C)
+private val Back = Color(0xFFF5F5F5)
 
 /** A bounded decode prevents large phone photos from exhausting the editor's memory. */
 private fun decodeEditableImage(context: android.content.Context, uri: Uri, maxDimension: Int = 2400): android.graphics.Bitmap? {
@@ -269,13 +280,27 @@ private fun PdfStudioApp(initialUri: Uri?) {
         if (pending != null) save.launch(suggestedCopyName(pendingSourceName ?: current?.let { fileNameFor(context, it) } ?: "PDFStudio", pendingOperation))
     }
 
-    val scheme = lightColorScheme(primary = Purple, background = Back, surface = Color.White, onSurface = Ink)
-    MaterialTheme(colorScheme = scheme) {
+    var isDarkMode by rememberSaveable {
+        mutableStateOf(context.getSharedPreferences("appearance", 0).getBoolean("dark_mode", false))
+    }
+    PdfStudioTheme(darkTheme = isDarkMode) {
+        SideEffect {
+            val window = (context as? ComponentActivity)?.window
+            if (window != null) {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !isDarkMode
+                    isAppearanceLightNavigationBars = !isDarkMode
+                }
+                @Suppress("DEPRECATION")
+                window.statusBarColor = if (isDarkMode) android.graphics.Color.rgb(21, 31, 42)
+                    else android.graphics.Color.rgb(245, 245, 245)
+            }
+        }
         Scaffold(
             snackbarHost = { SnackbarHost(snackbar) },
             bottomBar = {}
         ) { pad ->
-            Box(Modifier.fillMaxSize().padding(pad).background(Back)) {
+            Box(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background)) {
                 if (current == null) {
                     HomeScreen(recent, availableDraft, deliveryPattern, { openPdf.launch(arrayOf("application/pdf")) }, { tool ->
                         selectedTool = tool
@@ -293,7 +318,10 @@ private fun PdfStudioApp(initialUri: Uri?) {
                             selectedTool = Tool.TEXT
                             current = restored.document
                         }
-                    }, { images.launch(arrayOf("image/*")) })
+                    }, { images.launch(arrayOf("image/*")) }, isDarkMode, {
+                        isDarkMode = !isDarkMode
+                        context.getSharedPreferences("appearance", 0).edit().putBoolean("dark_mode", isDarkMode).apply()
+                    })
                 } else {
                     ViewerScreen(current!!, page, count, busy, onBack = { current = null }, onPage = { page = it }, onSearch = { searchOpen = true }, onExtract = { selectedTool = Tool.EXTRACT }, onRotate = { perform("rotado") { ops.rotate(current!!) } }, onText = { selectedTool = Tool.TEXT }, onOriginal = { selectedTool = Tool.ORIGINAL }, onPages = {
                         pageSequence = (1..count).joinToString(",")
@@ -364,14 +392,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
                         } finally { busy = false }
                     }
                 },
-                onSave = { edits ->
+                onSave = { edits, flatten ->
                     scope.launch {
                         busy = true
                         try {
                             pending?.delete(); pending = null
-                            val prepared = ops.applyEdits(source, edits)
+                            val prepared = if (flatten) ops.exportFlattened(source, edits) else ops.applyEdits(source, edits)
                             pendingEditBatch = edits
-                            pendingOperation = "editado"
+                            pendingOperation = if (flatten) "censurado-aplanado" else "editado"
                             pending = prepared
                         } catch (e: Exception) {
                             snackbar.showSnackbar("No se pudo preparar el PDF: ${e.message}. La edición sigue abierta.")
@@ -641,6 +669,7 @@ private fun PdfStudioApp(initialUri: Uri?) {
 
 /** Non-destructive edit session. All positions are page-relative, not screen-relative. */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun BatchEditor(
     uri: Uri,
     initialPage: Int,
@@ -651,12 +680,17 @@ private fun BatchEditor(
     initialPending: EditorDraftStore.Pending?,
     onDismiss: () -> Unit,
     onKeepDraft: (List<PdfOperations.EditOperation>, EditorDraftStore.Pending, Int) -> Unit,
-    onSave: (List<PdfOperations.EditOperation>) -> Unit
+    onSave: (List<PdfOperations.EditOperation>, Boolean) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val operations = remember { PdfOperations(context) }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    val edits = remember { mutableStateListOf<PdfOperations.EditOperation>().apply { addAll(initialEdits) } }
+    val imeVisible = WindowInsets.isImeVisible
+    val landscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val compactEditor = imeVisible || landscape
+    var history by remember { mutableStateOf(EditHistory(current = initialEdits.toList())) }
+    val edits = history.current
+    var showSecurityWarning by remember { mutableStateOf(false) }
     var page by remember { mutableIntStateOf(initialPage) }
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var mode by remember { mutableStateOf(initialPending?.mode ?: if (initialImage != null) PdfOperations.EditKind.IMAGE else if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
@@ -671,6 +705,7 @@ private fun BatchEditor(
     var validationMessage by remember { mutableStateOf<String?>(null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedEdit by remember { mutableIntStateOf(-1) }
+    var dragPreview by remember { mutableStateOf<PdfOperations.EditOperation?>(null) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { chosen ->
         if (chosen != null) {
             val picked = try { decodeEditableImage(context, chosen) }
@@ -699,17 +734,17 @@ private fun BatchEditor(
         val b = last ?: a
         if (mode == PdfOperations.EditKind.TEXT) {
             if (textToAdd.isBlank()) return
-            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
+            history = history.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
             textToAdd = ""
             keyboard?.hide()
         } else if (mode == PdfOperations.EditKind.IMAGE) {
             val image = imageToAdd ?: return
-            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, width = imageWidth, image = image))
+            history = history.add(PdfOperations.EditOperation(page, mode, a.x, a.y, width = imageWidth, image = image))
             imageToAdd = null
         } else {
             val x = min(a.x, b.x)
             val y = min(a.y, b.y)
-            edits.add(PdfOperations.EditOperation(page, mode, x, y,
+            history = history.add(PdfOperations.EditOperation(page, mode, x, y,
                 width = abs(a.x - b.x).coerceAtLeast(.005f),
                 height = abs(a.y - b.y).coerceAtLeast(.003f)))
         }
@@ -718,7 +753,8 @@ private fun BatchEditor(
 
     fun discard() {
         imageToAdd?.recycle()
-        edits.mapNotNull { it.image }.forEach { it.recycle() }
+        // Images can still be referenced by undo/redo snapshots; release only on exit.
+        (history.past.flatten() + history.current + history.future.flatten()).mapNotNull { it.image }.distinct().forEach { if (!it.isRecycled) it.recycle() }
         onDismiss()
     }
 
@@ -757,43 +793,58 @@ private fun BatchEditor(
         else discard()
     }
 
-    Dialog(onDismissRequest = ::askToExit, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = Back) {
-            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
+    BackHandler { askToExit() }
+    // A real full-screen editor avoids the Android Dialog window's landscape margins and clipping.
+    Surface(Modifier.fillMaxSize().imePadding(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().padding(horizontal = if (landscape) 8.dp else 12.dp, vertical = if (compactEditor) 2.dp else 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::askToExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
                     Column(Modifier.weight(1f)) {
                         Text("Editar PDF", fontWeight = FontWeight.Bold)
-                        Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = Purple)
+                        if (!compactEditor) Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
-                    TextButton(onClick = { currentSession()?.let(onSave) }) {
-                        Icon(Icons.Default.Check, null); Text("Guardar PDF")
+                    TextButton(onClick = { currentSession()?.let { staged ->
+                        if (staged.any { it.kind == PdfOperations.EditKind.REDACT }) showSecurityWarning = true
+                        else onSave(staged, false)
+                    } }) {
+                        Icon(Icons.Default.Check, null); Text(if (compactEditor) "Guardar" else "Guardar PDF")
                     }
                 }
                 validationMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                if (!imeVisible) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { page--; first = null; last = null }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Página anterior") }
                     Text("Página ${page + 1} de $pageCount", fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = { page++; first = null; last = null }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Página siguiente") }
                 }
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PdfOperations.EditKind.entries.forEachIndexed { index, option ->
-                        SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, PdfOperations.EditKind.entries.size)) {
-                            Text(when (option) {
+                        FilterChip(selected = mode == option, onClick = { mode = option; first = null; last = null }, label = {
+                            val label = when (option) {
                                 PdfOperations.EditKind.TEXT -> "Texto"
                                 PdfOperations.EditKind.IMAGE -> "Imagen"
                                 PdfOperations.EditKind.HIGHLIGHT -> "Resaltar"
                                 PdfOperations.EditKind.UNDERLINE -> "Subrayar"
                                 PdfOperations.EditKind.STRIKEOUT -> "Tachar"
-                            }, style = MaterialTheme.typography.labelSmall)
-                        }
+                                PdfOperations.EditKind.REDACT -> "Censurar"
+                            }
+                            if (compactEditor) Icon(when (option) {
+                                PdfOperations.EditKind.TEXT -> Icons.Default.TextFields
+                                PdfOperations.EditKind.IMAGE -> Icons.Default.Image
+                                PdfOperations.EditKind.HIGHLIGHT -> Icons.Default.BorderColor
+                                PdfOperations.EditKind.UNDERLINE -> Icons.Default.FormatUnderlined
+                                PdfOperations.EditKind.STRIKEOUT -> Icons.Default.StrikethroughS
+                                PdfOperations.EditKind.REDACT -> Icons.Default.VisibilityOff
+                            }, contentDescription = label, modifier = Modifier.size(18.dp))
+                            else Text(label, style = MaterialTheme.typography.labelSmall)
+                        })
                     }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!compactEditor) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = selectionMode, onClick = { selectionMode = !selectionMode; selectedEdit = -1 }, label = { Text("Seleccionar cambios") })
                     if (selectedEdit in edits.indices) {
                         TextButton(onClick = {
-                            val edit = edits.removeAt(selectedEdit)
+                            val edit = edits[selectedEdit]
+                            history = history.remove(selectedEdit)
                             mode = edit.kind; page = edit.pageIndex
                             first = Offset(edit.x, edit.y)
                             last = if (edit.kind == PdfOperations.EditKind.TEXT || edit.kind == PdfOperations.EditKind.IMAGE) null
@@ -802,12 +853,13 @@ private fun BatchEditor(
                             if (edit.kind == PdfOperations.EditKind.IMAGE) { imageToAdd = edit.image; imageWidth = edit.width }
                             selectionMode = false; selectedEdit = -1
                         }) { Text("Modificar") }
-                        TextButton(onClick = { edits.removeAt(selectedEdit).image?.recycle(); selectedEdit = -1 }) { Text("Eliminar") }
+                        TextButton(onClick = { history = history.remove(selectedEdit); selectedEdit = -1 }) { Text("Eliminar") }
                     }
                 }
                 if (mode == PdfOperations.EditKind.TEXT) {
-                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), maxLines = 2, singleLine = true)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        textStyle = if (imeVisible) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge)
+                    if (!compactEditor) Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
                         Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
                     }
@@ -820,13 +872,15 @@ private fun BatchEditor(
                     Slider(imageWidth, { imageWidth = it }, valueRange = .08f..1f)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex).image?.recycle() }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    OutlinedButton(onClick = { history = history.undo(); selectedEdit = -1 }, enabled = history.canUndo, modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    OutlinedButton(onClick = { history = history.redo(); selectedEdit = -1 }, enabled = history.canRedo, modifier = Modifier.weight(1f)) { Text("Rehacer") }
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
                 }
                 val latest = edits.lastOrNull()
-                if (latest != null && latest.pageIndex == page) {
+                if (!compactEditor && latest != null && latest.pageIndex == page) {
                     TextButton(onClick = {
-                        val edit = edits.removeAt(edits.lastIndex)
+                        val edit = edits.last()
+                        history = history.remove(edits.lastIndex)
                         mode = edit.kind
                         first = Offset(edit.x, edit.y)
                         last = if (edit.kind == PdfOperations.EditKind.TEXT || edit.kind == PdfOperations.EditKind.IMAGE) null
@@ -840,7 +894,7 @@ private fun BatchEditor(
                         }
                     }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text("Reeditar último cambio de esta página") }
                 }
-                Text(when (mode) {
+                if (!compactEditor) Text(when (mode) {
                     PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
                     PdfOperations.EditKind.IMAGE -> "Tocá o arrastrá la imagen para ubicarla y pulsá Aplicar cambio."
                     else -> "Arrastrá para seleccionar la zona y pulsá Aplicar cambio."
@@ -874,12 +928,17 @@ private fun BatchEditor(
                                         }
                                     } ?: -1
                                 }
-                            }.pointerInput(page, selectedEdit) {
-                                detectDragGestures { change, drag ->
+                            }.pointerInput(page, selectedEdit, history.current) {
+                                detectDragGestures(onDragEnd = {
+                                    val index = selectedEdit
+                                    val moved = dragPreview
+                                    if (moved != null && index in history.current.indices) history = history.replace(index, moved)
+                                    dragPreview = null
+                                }, onDragCancel = { dragPreview = null }) { change, drag ->
                                     val index = selectedEdit
                                     if (index in edits.indices && edits[index].pageIndex == page) {
-                                        val edit = edits[index]
-                                        edits[index] = edit.copy(
+                                        val edit = dragPreview ?: edits[index]
+                                        dragPreview = edit.copy(
                                             x = (edit.x + drag.x / size.width).coerceIn(0f, 1f),
                                             y = (edit.y + drag.y / size.height).coerceIn(0f, 1f)
                                         )
@@ -933,7 +992,9 @@ private fun BatchEditor(
                                     val top = y * size.height
                                     val width = w * size.width
                                     val height = h * size.height
-                                    if (kind == PdfOperations.EditKind.HIGHLIGHT) {
+                                    if (kind == PdfOperations.EditKind.REDACT) {
+                                        drawRect(Color.Black, Offset(left, top), androidx.compose.ui.geometry.Size(width, height))
+                                    } else if (kind == PdfOperations.EditKind.HIGHLIGHT) {
                                         drawRect(Color(0xFFFFD32D), Offset(left, top), androidx.compose.ui.geometry.Size(width, height), alpha = .35f)
                                     } else {
                                         val lineY = if (kind == PdfOperations.EditKind.UNDERLINE) top + height else top + height / 2f
@@ -942,20 +1003,21 @@ private fun BatchEditor(
                                 }
                                 edits.forEachIndexed { index, edit ->
                                     if (edit.pageIndex != page) return@forEachIndexed
-                                    if (edit.kind == PdfOperations.EditKind.TEXT) {
+                                    val visible = if (selectedEdit == index) dragPreview ?: edit else edit
+                                    if (visible.kind == PdfOperations.EditKind.TEXT) {
                                         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                                             color = android.graphics.Color.rgb(28, 28, 40)
-                                            textSize = edit.fontSize * size.width / 595f
+                                            textSize = visible.fontSize * size.width / 595f
                                         }
-                                        drawContext.canvas.nativeCanvas.drawText(edit.text.replace('\n', ' '), edit.x * size.width, edit.y * size.height, paint)
-                                    } else if (edit.kind == PdfOperations.EditKind.IMAGE) {
-                                        edit.image?.let { image ->
-                                            val w = size.width * edit.width
+                                        drawContext.canvas.nativeCanvas.drawText(visible.text.replace('\n', ' '), visible.x * size.width, visible.y * size.height, paint)
+                                    } else if (visible.kind == PdfOperations.EditKind.IMAGE) {
+                                        visible.image?.let { image ->
+                                            val w = size.width * visible.width
                                             val h = w * image.height / image.width
-                                            val left = edit.x * size.width; val top = edit.y * size.height
+                                            val left = visible.x * size.width; val top = visible.y * size.height
                                             drawContext.canvas.nativeCanvas.drawBitmap(image, null, android.graphics.RectF(left, top, left + w, top + h), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
                                         }
-                                    } else drawMarkup(edit.kind, edit.x, edit.y, edit.width, edit.height)
+                                    } else drawMarkup(visible.kind, visible.x, visible.y, visible.width, visible.height)
                                     if (selectionMode && selectedEdit == index) {
                                         val w = if (edit.kind == PdfOperations.EditKind.TEXT) (edit.text.length * edit.fontSize * .55f / 595f).coerceAtLeast(.04f) else edit.width
                                         val h = if (edit.kind == PdfOperations.EditKind.IMAGE) edit.image?.let { w * it.height.toFloat() / it.width * size.width / size.height } ?: .1f
@@ -1000,7 +1062,18 @@ private fun BatchEditor(
                     }
                 }
             }
-        }
+    }
+    if (showSecurityWarning) {
+        AlertDialog(
+            onDismissRequest = { showSecurityWarning = false },
+            title = { Text("Censura segura · copia aplanada") },
+            text = { Text("Tapar o tachar texto solamente lo oculta: el contenido original puede extraerse. Para censurar, PDF Studio convertirá TODAS las páginas en imágenes y creará un PDF nuevo. Se perderán texto seleccionable, búsqueda, enlaces, formularios y capas. El original queda intacto. Revisá también las zonas sensibles antes de compartir.") },
+            confirmButton = { TextButton(onClick = {
+                showSecurityWarning = false
+                currentSession()?.let { onSave(it, true) }
+            }) { Text("Crear copia segura") } },
+            dismissButton = { TextButton(onClick = { showSecurityWarning = false }) { Text("Seguir editando") } }
+        )
     }
     if (confirmExit) {
         AlertDialog(
@@ -1038,7 +1111,7 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
         }
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1058,7 +1131,7 @@ private fun PageOrganizer(uri: Uri, pageCount: Int, onDismiss: () -> Unit, onSav
                     items(order.size) { index ->
                         Column(
                             Modifier.width(138.dp)
-                                .background(if (selected == index) Color(0xFFE4DEFF) else Color.White, RoundedCornerShape(14.dp))
+                                .background(if (selected == index) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface, RoundedCornerShape(14.dp))
                                 .clickable { selected = index }
                                 .pointerInput(index, order.size) {
                                     var dragged = 0f
@@ -1172,7 +1245,7 @@ private fun ImagePlacementEditor(
         background = try { operations.renderPage(uri, page, 1200) } catch (_: Exception) { null }
     }
     Dialog(onDismissRequest = ::closeWithoutSaving, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().navigationBarsPadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::closeWithoutSaving) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1300,7 +1373,7 @@ private fun PlacementEditor(
         )
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = Back) {
+        Surface(Modifier.fillMaxSize().safeDrawingPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Cancelar") }
@@ -1387,27 +1460,30 @@ private fun PlacementEditor(
 private fun HomeScreen(
     recent: List<String>, draft: EditorDraftStore.Draft?, deliveryPattern: String, open: () -> Unit,
     action: (Tool) -> Unit, openRecent: (String) -> Unit,
-    resumeDraft: (EditorDraftStore.Draft) -> Unit, repeatDelivery: () -> Unit
+    resumeDraft: (EditorDraftStore.Draft) -> Unit, repeatDelivery: () -> Unit,
+    isDarkMode: Boolean, onToggleTheme: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val landscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
     LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
-            Box(Modifier.fillMaxWidth().height(160.dp).background(Brush.linearGradient(listOf(Color(0xFF5750C9), Color(0xFF9D8DEC), Color(0xFFFFD5C9))))) {
-                Column(Modifier.padding(20.dp)) {
+            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary)) {
+                Column(Modifier.padding(horizontal = 20.dp, vertical = if (landscape) 8.dp else 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Description, null, tint = Color.White, modifier = Modifier.size(30.dp))
+                        Icon(Icons.Default.Description, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(30.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("PDF Studio", color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("PDF Studio", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        IconButton(onClick = onToggleTheme) {
+                            Icon(if (isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                if (isDarkMode) "Activar tema claro" else "Activar tema oscuro", tint = MaterialTheme.colorScheme.onPrimary)
+                        }
                     }
-                    Spacer(Modifier.height(14.dp))
-                    Text("Tus documentos, a tu manera.", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text("Todo lo que necesitás, sin conexión.", color = Color.White.copy(alpha = .85f))
                 }
             }
         }
         if (draft != null) item {
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 7.dp)
-                .background(Color(0xFFE4DEFF), RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(16.dp))
                 .clickable { resumeDraft(draft) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.EditNote, null, tint = Purple)
                 Spacer(Modifier.width(10.dp))
@@ -1423,7 +1499,7 @@ private fun HomeScreen(
             val uri = Uri.parse(recent.first())
             val lastPage = context.getSharedPreferences("reading", 0).getInt("page_${uri.toString().hashCode()}", 0)
             Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp)
-                .background(Color.White, RoundedCornerShape(16.dp)).clickable { openRecent(recent.first()) }.padding(10.dp),
+                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp)).clickable { openRecent(recent.first()) }.padding(10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 PageThumbnail(uri, lastPage, Modifier.size(width = 58.dp, height = 78.dp))
                 Spacer(Modifier.width(12.dp))
@@ -1436,22 +1512,22 @@ private fun HomeScreen(
             }
         }
         item {
-            Column(Modifier.padding(horizontal = 18.dp).offset(y = (-16).dp).background(Color.White, RoundedCornerShape(24.dp)).padding(16.dp)) {
+            Column(Modifier.padding(horizontal = 18.dp, vertical = 12.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(24.dp)).padding(16.dp)) {
                 Text("Acciones rápidas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ToolCard("Abrir PDF", Icons.Default.FolderOpen, Pastels[0], Modifier.weight(1f)) { open() }
-                    ToolCard("Fotos a PDF", Icons.Default.AddPhotoAlternate, Pastels[1], Modifier.weight(1f)) { action(Tool.IMAGES) }
-                    ToolCard("Editar", Icons.Default.Edit, Pastels[2], Modifier.weight(1f)) { action(Tool.TEXT) }
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToolCard("Abrir PDF", Icons.Default.FolderOpen, PastelCards[0], Modifier.weight(1f).fillMaxHeight()) { open() }
+                    ToolCard("Fotos a PDF", Icons.Default.AddPhotoAlternate, PastelCards[1], Modifier.weight(1f).fillMaxHeight()) { action(Tool.IMAGES) }
+                    ToolCard("Editar", Icons.Default.Edit, PastelCards[2], Modifier.weight(1f).fillMaxHeight()) { action(Tool.TEXT) }
                 }
                 Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ToolCard("Unir PDF", Icons.Default.FileCopy, Pastels[3], Modifier.weight(1f)) { action(Tool.MERGE) }
-                    ToolCard("Texto/Word a PDF", Icons.Default.Article, Pastels[4], Modifier.weight(1f)) { action(Tool.DOCUMENT) }
-                    ToolCard("Extraer texto", Icons.Default.DocumentScanner, Pastels[5], Modifier.weight(1f)) { action(Tool.OCR) }
+                Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToolCard("Unir PDF", Icons.Default.FileCopy, PastelCards[3], Modifier.weight(1f).fillMaxHeight()) { action(Tool.MERGE) }
+                    ToolCard("Texto/Word a PDF", Icons.Default.Article, PastelCards[4], Modifier.weight(1f).fillMaxHeight()) { action(Tool.DOCUMENT) }
+                    ToolCard("Extraer texto", Icons.Default.DocumentScanner, PastelCards[5], Modifier.weight(1f).fillMaxHeight()) { action(Tool.OCR) }
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("Elegí una acción. Si necesita un documento, te pediremos que abras el PDF. Para más herramientas, entrá al visor.", color = Color.Gray, style = MaterialTheme.typography.bodySmall)
+                Text("Elegí una acción. Para más herramientas, entrá al visor.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 if (deliveryPattern != "Fotos") {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = repeatDelivery, modifier = Modifier.fillMaxWidth()) {
@@ -1461,13 +1537,13 @@ private fun HomeScreen(
             }
         }
         item { Text("Documentos recientes", Modifier.padding(start = 22.dp, top = 8.dp, bottom = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        if (recent.isEmpty()) item { Text("Todavía no hay documentos recientes.", Modifier.padding(horizontal = 22.dp), color = Color.Gray) }
+        if (recent.isEmpty()) item { Text("Todavía no hay documentos recientes.", Modifier.padding(horizontal = 22.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         items(recent) { value ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp).background(Color.White, RoundedCornerShape(16.dp)).clickable { openRecent(value) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(16.dp)).clickable { openRecent(value) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.PictureAsPdf, null, tint = Color(0xFFE66A73))
                 Spacer(Modifier.width(12.dp))
                 Text(Uri.parse(value).lastPathSegment ?: "Documento PDF", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Icon(Icons.Default.ChevronRight, null, tint = Color.Gray)
+                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -1475,10 +1551,20 @@ private fun HomeScreen(
 
 @Composable
 private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color, modifier: Modifier, enabled: Boolean = true, onClick: () -> Unit) {
-    Column(modifier.background(color.copy(alpha = if (enabled) 1f else .4f), RoundedCornerShape(18.dp)).clickable(enabled = enabled, onClick = onClick).padding(vertical = 18.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(icon, null, tint = if (enabled) Purple else Color.LightGray, modifier = Modifier.size(28.dp))
+    val dark = MaterialTheme.colorScheme.background == NightBackground
+    Card(modifier = modifier.heightIn(min = 112.dp).clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = if (dark) MaterialTheme.colorScheme.surfaceVariant else color,
+            contentColor = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C))) {
+    Box(Modifier.fillMaxSize().defaultMinSize(minHeight = 112.dp), contentAlignment = Alignment.Center) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, modifier = Modifier.size(28.dp))
         Spacer(Modifier.height(8.dp))
-        Text(name, style = MaterialTheme.typography.labelMedium, color = if (enabled) Ink else Color.Gray)
+        Text(name, style = MaterialTheme.typography.labelMedium, color = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C), textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 2)
+    }
+    }
     }
 }
 
@@ -1610,6 +1696,17 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
     var jumpDialog by remember { mutableStateOf(false) }
     var jumpText by remember { mutableStateOf("") }
     var showAbout by remember { mutableStateOf(false) }
+    var fullscreen by rememberSaveable(uri) { mutableStateOf(false) }
+    val window = (context as? ComponentActivity)?.window
+    DisposableEffect(fullscreen, window) {
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        if (fullscreen) {
+            controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else controller?.show(WindowInsetsCompat.Type.systemBars())
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
+    BackHandler(fullscreen) { fullscreen = false }
     LaunchedEffect(uri, page, retry) {
         image = null
         zoom = 1f
@@ -1618,10 +1715,13 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
         catch (e: Exception) { renderError = e.message ?: "Archivo incompatible" }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().background(Color.White).padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (!fullscreen) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
             Text(fileNameFor(context, uri), modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             IconButton(onClick = onSearch, enabled = !busy) { Icon(Icons.Default.Search, "Buscar texto") }
+            IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "Ver PDF en pantalla completa") }
+        }
         }
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0xFFE9E8F1)), contentAlignment = Alignment.Center) {
             val bitmap = image
@@ -1646,13 +1746,34 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                     }
                 }.graphicsLayer(scaleX = zoom, scaleY = zoom, translationX = pan.x, translationY = pan.y),
                 contentScale = ContentScale.Fit)
+            if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd)
+                .padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = .85f), RoundedCornerShape(12.dp))) {
+                Icon(Icons.Default.FullscreenExit, "Salir de pantalla completa")
+            }
+            if (fullscreen) Row(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .9f), RoundedCornerShape(30.dp))
+                    .padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) {
+                    Icon(Icons.Default.ChevronLeft, "Página anterior")
+                }
+                TextButton(onClick = { jumpText = (page + 1).toString(); jumpDialog = true }) {
+                    Text("${page + 1} / $count")
+                }
+                IconButton(onClick = { onPage(page + 1) }, enabled = page + 1 < count) {
+                    Icon(Icons.Default.ChevronRight, "Página siguiente")
+                }
+            }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+        if (!fullscreen) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Anterior") }
             TextButton(onClick = { jumpText = (page + 1).toString(); jumpDialog = true }) { Text("${page + 1} / $count") }
             IconButton(onClick = { onPage(page + 1) }, enabled = page + 1 < count) { Icon(Icons.Default.ChevronRight, "Siguiente") }
         }
-        Row(Modifier.fillMaxWidth().background(Color.White), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface), horizontalArrangement = Arrangement.SpaceEvenly) {
             listOf("Anotar", "Páginas", "Más").forEach { label ->
                 Box {
                     TextButton(onClick = { openMenu = label }) { Text(label, fontWeight = FontWeight.SemiBold) }
@@ -1671,6 +1792,7 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                     }
                 }
             }
+        }
         }
     }
     if (jumpDialog) AlertDialog(onDismissRequest = { jumpDialog = false }, title = { Text("Ir a la página") },

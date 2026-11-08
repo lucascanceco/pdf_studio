@@ -1,9 +1,9 @@
 name: Android APK
 on:
   push:
-    branches: [main]
+    branches: [main, release/integrated-0_4_0]
   pull_request:
-    branches: [main]
+    branches: [main, release/integrated-0_4_0]
   workflow_dispatch:
 jobs:
   build:
@@ -17,10 +17,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
       - name: Verify merged manifest and APK metadata
         shell: bash
         run: |
