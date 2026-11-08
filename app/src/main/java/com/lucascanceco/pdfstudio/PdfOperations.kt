@@ -21,6 +21,8 @@ import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.graphics.state.RenderingMode
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.tom_roush.pdfbox.rendering.PDFRenderer as BoxRenderer
+import android.graphics.Color as AndroidColor
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -174,7 +176,7 @@ class PdfOperations(private val context: Context) {
 
     enum class Markup { HIGHLIGHT, UNDERLINE, STRIKEOUT }
 
-    enum class EditKind { TEXT, IMAGE, HIGHLIGHT, UNDERLINE, STRIKEOUT }
+    enum class EditKind { TEXT, IMAGE, HIGHLIGHT, UNDERLINE, STRIKEOUT, REDACT }
 
     /** Coordinates are normalized to each PDF page and remain stable if the keyboard resizes the UI. */
     data class EditOperation(
@@ -190,8 +192,13 @@ class PdfOperations(private val context: Context) {
     )
 
     /** Transactional multi-page editing: writes all staged changes into one new PDF. */
-    suspend fun applyEdits(uri: Uri, edits: List<EditOperation>): File = withContext(Dispatchers.IO) {
+    suspend fun applyEdits(uri: Uri, edits: List<EditOperation>): File = stageEdits(uri, edits, false)
+
+    private suspend fun stageEdits(uri: Uri, edits: List<EditOperation>, allowRedactions: Boolean): File = withContext(Dispatchers.IO) {
         require(edits.isNotEmpty()) { "No hay modificaciones para guardar" }
+        require(allowRedactions || edits.none { it.kind == EditKind.REDACT }) {
+            "Una censura debe exportarse como copia aplanada, nunca como una marca visual"
+        }
         val source = copyToTemp(uri, ".pdf")
         val output = File.createTempFile("pdfstudio_edited_", ".pdf", context.cacheDir)
         try {
@@ -225,7 +232,11 @@ class PdfOperations(private val context: Context) {
                                 val w = box.width * edit.width.coerceIn(.005f, 1f)
                                 val h = box.height * edit.height.coerceIn(.003f, 1f)
                                 stream.saveGraphicsState()
-                                if (edit.kind == EditKind.HIGHLIGHT) {
+                                if (edit.kind == EditKind.REDACT) {
+                                    stream.setNonStrokingColor(0, 0, 0)
+                                    stream.addRect(x, top - h, w, h)
+                                    stream.fill()
+                                } else if (edit.kind == EditKind.HIGHLIGHT) {
                                     val alpha = PDExtendedGraphicsState()
                                     alpha.nonStrokingAlphaConstant = .30f
                                     stream.setGraphicsStateParameters(alpha)
@@ -250,6 +261,55 @@ class PdfOperations(private val context: Context) {
             output
         } catch (e: Exception) { output.delete(); throw e }
         finally { source.delete() }
+    }
+
+    /**
+     * Security export: burn edits and opaque redaction areas into pixel-only pages.
+     * Original content streams, text, attachments, links and annotations are NOT copied.
+     * Never use the visual-only applyEdits result as a safely redacted document.
+     */
+    suspend fun exportFlattened(uri: Uri, edits: List<EditOperation>, dpi: Float = 144f): File = withContext(Dispatchers.IO) {
+        require(dpi in 96f..220f) { "Resolución fuera del rango seguro" }
+        require(edits.any { it.kind == EditKind.REDACT }) { "Marcá al menos una región para censurar" }
+        require(edits.filter { it.kind == EditKind.REDACT }.all {
+            it.width > .002f && it.height > .002f && it.x >= 0f && it.y >= 0f &&
+                it.x + it.width <= 1.001f && it.y + it.height <= 1.001f
+        }) { "Hay una región de censura inválida" }
+        val staged = stageEdits(uri, edits, true)
+        val result = File.createTempFile("pdfstudio_flattened_", ".pdf", context.cacheDir)
+        try {
+            PDDocument.load(staged).use { input ->
+                val renderer = BoxRenderer(input)
+                PDDocument().use { output ->
+                    for (index in 0 until input.numberOfPages) {
+                        val original = input.getPage(index).cropBox ?: input.getPage(index).mediaBox
+                        val bitmap = renderer.renderImageWithDPI(index, dpi)
+                        try {
+                            // JPEG is opaque. Converted pages contain pixels only, not editable PDF layers.
+                            val opaque = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.RGB_565)
+                            try {
+                                val canvas = android.graphics.Canvas(opaque)
+                                canvas.drawColor(AndroidColor.WHITE)
+                                canvas.drawBitmap(bitmap, 0f, 0f, null)
+                                val page = PDPage(PDRectangle(original.width, original.height))
+                                output.addPage(page)
+                                PDPageContentStream(output, page).use { stream ->
+                                    stream.drawImage(JPEGFactory.createFromImage(output, opaque, .94f), 0f, 0f, original.width, original.height)
+                                }
+                            } finally { opaque.recycle() }
+                        } finally { bitmap.recycle() }
+                    }
+                    output.save(result)
+                }
+            }
+            PDDocument.load(result).use { check ->
+                require(check.numberOfPages > 0 && PDFTextStripper().getText(check).isBlank()) {
+                    "La copia aplanada conserva texto extraíble; no se exportó"
+                }
+            }
+            result
+        } catch (e: Exception) { result.delete(); throw e }
+        finally { staged.delete() }
     }
 
     /** Draws an annotation visually over an area chosen by the user. Does not delete original text. */

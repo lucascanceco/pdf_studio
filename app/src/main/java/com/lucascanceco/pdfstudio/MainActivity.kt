@@ -364,14 +364,14 @@ private fun PdfStudioApp(initialUri: Uri?) {
                         } finally { busy = false }
                     }
                 },
-                onSave = { edits ->
+                onSave = { edits, flatten ->
                     scope.launch {
                         busy = true
                         try {
                             pending?.delete(); pending = null
-                            val prepared = ops.applyEdits(source, edits)
+                            val prepared = if (flatten) ops.exportFlattened(source, edits) else ops.applyEdits(source, edits)
                             pendingEditBatch = edits
-                            pendingOperation = "editado"
+                            pendingOperation = if (flatten) "censurado-aplanado" else "editado"
                             pending = prepared
                         } catch (e: Exception) {
                             snackbar.showSnackbar("No se pudo preparar el PDF: ${e.message}. La edición sigue abierta.")
@@ -651,12 +651,14 @@ private fun BatchEditor(
     initialPending: EditorDraftStore.Pending?,
     onDismiss: () -> Unit,
     onKeepDraft: (List<PdfOperations.EditOperation>, EditorDraftStore.Pending, Int) -> Unit,
-    onSave: (List<PdfOperations.EditOperation>) -> Unit
+    onSave: (List<PdfOperations.EditOperation>, Boolean) -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val operations = remember { PdfOperations(context) }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    val edits = remember { mutableStateListOf<PdfOperations.EditOperation>().apply { addAll(initialEdits) } }
+    var history by remember { mutableStateOf(EditHistory(current = initialEdits.toList())) }
+    val edits = history.current
+    var showSecurityWarning by remember { mutableStateOf(false) }
     var page by remember { mutableIntStateOf(initialPage) }
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var mode by remember { mutableStateOf(initialPending?.mode ?: if (initialImage != null) PdfOperations.EditKind.IMAGE else if (startWithText) PdfOperations.EditKind.TEXT else PdfOperations.EditKind.HIGHLIGHT) }
@@ -671,6 +673,7 @@ private fun BatchEditor(
     var validationMessage by remember { mutableStateOf<String?>(null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedEdit by remember { mutableIntStateOf(-1) }
+    var dragPreview by remember { mutableStateOf<PdfOperations.EditOperation?>(null) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { chosen ->
         if (chosen != null) {
             val picked = try { decodeEditableImage(context, chosen) }
@@ -699,17 +702,17 @@ private fun BatchEditor(
         val b = last ?: a
         if (mode == PdfOperations.EditKind.TEXT) {
             if (textToAdd.isBlank()) return
-            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
+            history = history.add(PdfOperations.EditOperation(page, mode, a.x, a.y, text = textToAdd, fontSize = fontSize))
             textToAdd = ""
             keyboard?.hide()
         } else if (mode == PdfOperations.EditKind.IMAGE) {
             val image = imageToAdd ?: return
-            edits.add(PdfOperations.EditOperation(page, mode, a.x, a.y, width = imageWidth, image = image))
+            history = history.add(PdfOperations.EditOperation(page, mode, a.x, a.y, width = imageWidth, image = image))
             imageToAdd = null
         } else {
             val x = min(a.x, b.x)
             val y = min(a.y, b.y)
-            edits.add(PdfOperations.EditOperation(page, mode, x, y,
+            history = history.add(PdfOperations.EditOperation(page, mode, x, y,
                 width = abs(a.x - b.x).coerceAtLeast(.005f),
                 height = abs(a.y - b.y).coerceAtLeast(.003f)))
         }
@@ -718,7 +721,8 @@ private fun BatchEditor(
 
     fun discard() {
         imageToAdd?.recycle()
-        edits.mapNotNull { it.image }.forEach { it.recycle() }
+        // Images can still be referenced by undo/redo snapshots; release only on exit.
+        (history.past.flatten() + history.current + history.future.flatten()).mapNotNull { it.image }.distinct().forEach { if (!it.isRecycled) it.recycle() }
         onDismiss()
     }
 
@@ -766,7 +770,10 @@ private fun BatchEditor(
                         Text("Editar PDF", fontWeight = FontWeight.Bold)
                         Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = Purple)
                     }
-                    TextButton(onClick = { currentSession()?.let(onSave) }) {
+                    TextButton(onClick = { currentSession()?.let { staged ->
+                        if (staged.any { it.kind == PdfOperations.EditKind.REDACT }) showSecurityWarning = true
+                        else onSave(staged, false)
+                    } }) {
                         Icon(Icons.Default.Check, null); Text("Guardar PDF")
                     }
                 }
@@ -776,7 +783,7 @@ private fun BatchEditor(
                     Text("Página ${page + 1} de $pageCount", fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = { page++; first = null; last = null }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Página siguiente") }
                 }
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                     PdfOperations.EditKind.entries.forEachIndexed { index, option ->
                         SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, PdfOperations.EditKind.entries.size)) {
                             Text(when (option) {
@@ -785,6 +792,7 @@ private fun BatchEditor(
                                 PdfOperations.EditKind.HIGHLIGHT -> "Resaltar"
                                 PdfOperations.EditKind.UNDERLINE -> "Subrayar"
                                 PdfOperations.EditKind.STRIKEOUT -> "Tachar"
+                                PdfOperations.EditKind.REDACT -> "Censurar"
                             }, style = MaterialTheme.typography.labelSmall)
                         }
                     }
@@ -793,7 +801,8 @@ private fun BatchEditor(
                     FilterChip(selected = selectionMode, onClick = { selectionMode = !selectionMode; selectedEdit = -1 }, label = { Text("Seleccionar cambios") })
                     if (selectedEdit in edits.indices) {
                         TextButton(onClick = {
-                            val edit = edits.removeAt(selectedEdit)
+                            val edit = edits[selectedEdit]
+                            history = history.remove(selectedEdit)
                             mode = edit.kind; page = edit.pageIndex
                             first = Offset(edit.x, edit.y)
                             last = if (edit.kind == PdfOperations.EditKind.TEXT || edit.kind == PdfOperations.EditKind.IMAGE) null
@@ -802,7 +811,7 @@ private fun BatchEditor(
                             if (edit.kind == PdfOperations.EditKind.IMAGE) { imageToAdd = edit.image; imageWidth = edit.width }
                             selectionMode = false; selectedEdit = -1
                         }) { Text("Modificar") }
-                        TextButton(onClick = { edits.removeAt(selectedEdit).image?.recycle(); selectedEdit = -1 }) { Text("Eliminar") }
+                        TextButton(onClick = { history = history.remove(selectedEdit); selectedEdit = -1 }) { Text("Eliminar") }
                     }
                 }
                 if (mode == PdfOperations.EditKind.TEXT) {
@@ -820,13 +829,15 @@ private fun BatchEditor(
                     Slider(imageWidth, { imageWidth = it }, valueRange = .08f..1f)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = { if (edits.isNotEmpty()) edits.removeAt(edits.lastIndex).image?.recycle() }, enabled = edits.isNotEmpty(), modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    OutlinedButton(onClick = { history = history.undo(); selectedEdit = -1 }, enabled = history.canUndo, modifier = Modifier.weight(1f)) { Text("Deshacer") }
+                    OutlinedButton(onClick = { history = history.redo(); selectedEdit = -1 }, enabled = history.canRedo, modifier = Modifier.weight(1f)) { Text("Rehacer") }
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
                 }
                 val latest = edits.lastOrNull()
                 if (latest != null && latest.pageIndex == page) {
                     TextButton(onClick = {
-                        val edit = edits.removeAt(edits.lastIndex)
+                        val edit = edits.last()
+                        history = history.remove(edits.lastIndex)
                         mode = edit.kind
                         first = Offset(edit.x, edit.y)
                         last = if (edit.kind == PdfOperations.EditKind.TEXT || edit.kind == PdfOperations.EditKind.IMAGE) null
@@ -874,12 +885,17 @@ private fun BatchEditor(
                                         }
                                     } ?: -1
                                 }
-                            }.pointerInput(page, selectedEdit) {
-                                detectDragGestures { change, drag ->
+                            }.pointerInput(page, selectedEdit, history.current) {
+                                detectDragGestures(onDragEnd = {
+                                    val index = selectedEdit
+                                    val moved = dragPreview
+                                    if (moved != null && index in history.current.indices) history = history.replace(index, moved)
+                                    dragPreview = null
+                                }, onDragCancel = { dragPreview = null }) { change, drag ->
                                     val index = selectedEdit
                                     if (index in edits.indices && edits[index].pageIndex == page) {
-                                        val edit = edits[index]
-                                        edits[index] = edit.copy(
+                                        val edit = dragPreview ?: edits[index]
+                                        dragPreview = edit.copy(
                                             x = (edit.x + drag.x / size.width).coerceIn(0f, 1f),
                                             y = (edit.y + drag.y / size.height).coerceIn(0f, 1f)
                                         )
@@ -933,7 +949,9 @@ private fun BatchEditor(
                                     val top = y * size.height
                                     val width = w * size.width
                                     val height = h * size.height
-                                    if (kind == PdfOperations.EditKind.HIGHLIGHT) {
+                                    if (kind == PdfOperations.EditKind.REDACT) {
+                                        drawRect(Color.Black, Offset(left, top), androidx.compose.ui.geometry.Size(width, height))
+                                    } else if (kind == PdfOperations.EditKind.HIGHLIGHT) {
                                         drawRect(Color(0xFFFFD32D), Offset(left, top), androidx.compose.ui.geometry.Size(width, height), alpha = .35f)
                                     } else {
                                         val lineY = if (kind == PdfOperations.EditKind.UNDERLINE) top + height else top + height / 2f
@@ -942,20 +960,21 @@ private fun BatchEditor(
                                 }
                                 edits.forEachIndexed { index, edit ->
                                     if (edit.pageIndex != page) return@forEachIndexed
-                                    if (edit.kind == PdfOperations.EditKind.TEXT) {
+                                    val visible = if (selectedEdit == index) dragPreview ?: edit else edit
+                                    if (visible.kind == PdfOperations.EditKind.TEXT) {
                                         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
                                             color = android.graphics.Color.rgb(28, 28, 40)
-                                            textSize = edit.fontSize * size.width / 595f
+                                            textSize = visible.fontSize * size.width / 595f
                                         }
-                                        drawContext.canvas.nativeCanvas.drawText(edit.text.replace('\n', ' '), edit.x * size.width, edit.y * size.height, paint)
-                                    } else if (edit.kind == PdfOperations.EditKind.IMAGE) {
-                                        edit.image?.let { image ->
-                                            val w = size.width * edit.width
+                                        drawContext.canvas.nativeCanvas.drawText(visible.text.replace('\n', ' '), visible.x * size.width, visible.y * size.height, paint)
+                                    } else if (visible.kind == PdfOperations.EditKind.IMAGE) {
+                                        visible.image?.let { image ->
+                                            val w = size.width * visible.width
                                             val h = w * image.height / image.width
-                                            val left = edit.x * size.width; val top = edit.y * size.height
+                                            val left = visible.x * size.width; val top = visible.y * size.height
                                             drawContext.canvas.nativeCanvas.drawBitmap(image, null, android.graphics.RectF(left, top, left + w, top + h), android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG))
                                         }
-                                    } else drawMarkup(edit.kind, edit.x, edit.y, edit.width, edit.height)
+                                    } else drawMarkup(visible.kind, visible.x, visible.y, visible.width, visible.height)
                                     if (selectionMode && selectedEdit == index) {
                                         val w = if (edit.kind == PdfOperations.EditKind.TEXT) (edit.text.length * edit.fontSize * .55f / 595f).coerceAtLeast(.04f) else edit.width
                                         val h = if (edit.kind == PdfOperations.EditKind.IMAGE) edit.image?.let { w * it.height.toFloat() / it.width * size.width / size.height } ?: .1f
@@ -1001,6 +1020,18 @@ private fun BatchEditor(
                 }
             }
         }
+    }
+    if (showSecurityWarning) {
+        AlertDialog(
+            onDismissRequest = { showSecurityWarning = false },
+            title = { Text("Censura segura · copia aplanada") },
+            text = { Text("Tapar o tachar texto solamente lo oculta: el contenido original puede extraerse. Para censurar, PDF Studio convertirá TODAS las páginas en imágenes y creará un PDF nuevo. Se perderán texto seleccionable, búsqueda, enlaces, formularios y capas. El original queda intacto. Revisá también las zonas sensibles antes de compartir.") },
+            confirmButton = { TextButton(onClick = {
+                showSecurityWarning = false
+                currentSession()?.let { onSave(it, true) }
+            }) { Text("Crear copia segura") } },
+            dismissButton = { TextButton(onClick = { showSecurityWarning = false }) { Text("Seguir editando") } }
+        )
     }
     if (confirmExit) {
         AlertDialog(
