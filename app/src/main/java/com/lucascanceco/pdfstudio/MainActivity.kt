@@ -793,8 +793,9 @@ private fun BatchEditor(
         else discard()
     }
 
-    Dialog(onDismissRequest = ::askToExit, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
-        Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
+    BackHandler { askToExit() }
+    // A real full-screen editor avoids the Android Dialog window's landscape margins and clipping.
+    Surface(Modifier.fillMaxSize().imePadding(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize().padding(horizontal = if (landscape) 8.dp else 12.dp, vertical = if (compactEditor) 2.dp else 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::askToExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
@@ -1061,7 +1062,6 @@ private fun BatchEditor(
                     }
                 }
             }
-        }
     }
     if (showSecurityWarning) {
         AlertDialog(
@@ -1749,6 +1749,22 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
             if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd)
                 .padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = .85f), RoundedCornerShape(12.dp))) {
                 Icon(Icons.Default.FullscreenExit, "Salir de pantalla completa")
+            }
+            if (fullscreen) Row(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = .9f), RoundedCornerShape(30.dp))
+                    .padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) {
+                    Icon(Icons.Default.ChevronLeft, "Página anterior")
+                }
+                TextButton(onClick = { jumpText = (page + 1).toString(); jumpDialog = true }) {
+                    Text("${page + 1} / $count")
+                }
+                IconButton(onClick = { onPage(page + 1) }, enabled = page + 1 < count) {
+                    Icon(Icons.Default.ChevronRight, "Página siguiente")
+                }
             }
         }
         if (!fullscreen) {
