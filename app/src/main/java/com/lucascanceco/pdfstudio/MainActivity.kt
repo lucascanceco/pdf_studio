@@ -10,6 +10,7 @@ import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -68,6 +70,9 @@ import java.io.File
 import com.lucascanceco.pdfstudio.ui.theme.PdfStudioTheme
 import com.lucascanceco.pdfstudio.ui.theme.PastelCards
 import com.lucascanceco.pdfstudio.ui.theme.NightBackground
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 private val Purple = Color(0xFF1A5F7A) // Legacy alias for existing editor accents.
 private val Ink = Color(0xFF182F3C)
@@ -279,6 +284,18 @@ private fun PdfStudioApp(initialUri: Uri?) {
         mutableStateOf(context.getSharedPreferences("appearance", 0).getBoolean("dark_mode", false))
     }
     PdfStudioTheme(darkTheme = isDarkMode) {
+        SideEffect {
+            val window = (context as? ComponentActivity)?.window
+            if (window != null) {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !isDarkMode
+                    isAppearanceLightNavigationBars = !isDarkMode
+                }
+                @Suppress("DEPRECATION")
+                window.statusBarColor = if (isDarkMode) android.graphics.Color.rgb(21, 31, 42)
+                    else android.graphics.Color.rgb(245, 245, 245)
+            }
+        }
         Scaffold(
             snackbarHost = { SnackbarHost(snackbar) },
             bottomBar = {}
@@ -669,6 +686,8 @@ private fun BatchEditor(
     val operations = remember { PdfOperations(context) }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     val imeVisible = WindowInsets.isImeVisible
+    val landscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val compactEditor = imeVisible || landscape
     var history by remember { mutableStateOf(EditHistory(current = initialEdits.toList())) }
     val edits = history.current
     var showSecurityWarning by remember { mutableStateOf(false) }
@@ -776,18 +795,18 @@ private fun BatchEditor(
 
     Dialog(onDismissRequest = ::askToExit, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = true)) {
         Surface(Modifier.fillMaxSize().navigationBarsPadding().imePadding(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = if (imeVisible) 2.dp else 6.dp)) {
+            Column(Modifier.fillMaxSize().padding(horizontal = if (landscape) 8.dp else 12.dp, vertical = if (compactEditor) 2.dp else 6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = ::askToExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
                     Column(Modifier.weight(1f)) {
                         Text("Editar PDF", fontWeight = FontWeight.Bold)
-                        Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = Purple)
+                        if (!compactEditor) Text("${edits.size} cambios sin guardar", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     TextButton(onClick = { currentSession()?.let { staged ->
                         if (staged.any { it.kind == PdfOperations.EditKind.REDACT }) showSecurityWarning = true
                         else onSave(staged, false)
                     } }) {
-                        Icon(Icons.Default.Check, null); Text("Guardar PDF")
+                        Icon(Icons.Default.Check, null); Text(if (compactEditor) "Guardar" else "Guardar PDF")
                     }
                 }
                 validationMessage?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium) }
@@ -796,9 +815,9 @@ private fun BatchEditor(
                     Text("Página ${page + 1} de $pageCount", fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = { page++; first = null; last = null }, enabled = page + 1 < pageCount) { Icon(Icons.Default.ChevronRight, "Página siguiente") }
                 }
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PdfOperations.EditKind.entries.forEachIndexed { index, option ->
-                        SegmentedButton(selected = mode == option, onClick = { mode = option; first = null; last = null }, shape = SegmentedButtonDefaults.itemShape(index, PdfOperations.EditKind.entries.size)) {
+                        FilterChip(selected = mode == option, onClick = { mode = option; first = null; last = null }, label = {
                             val label = when (option) {
                                 PdfOperations.EditKind.TEXT -> "Texto"
                                 PdfOperations.EditKind.IMAGE -> "Imagen"
@@ -807,7 +826,7 @@ private fun BatchEditor(
                                 PdfOperations.EditKind.STRIKEOUT -> "Tachar"
                                 PdfOperations.EditKind.REDACT -> "Censurar"
                             }
-                            if (imeVisible) Icon(when (option) {
+                            if (compactEditor) Icon(when (option) {
                                 PdfOperations.EditKind.TEXT -> Icons.Default.TextFields
                                 PdfOperations.EditKind.IMAGE -> Icons.Default.Image
                                 PdfOperations.EditKind.HIGHLIGHT -> Icons.Default.BorderColor
@@ -816,10 +835,10 @@ private fun BatchEditor(
                                 PdfOperations.EditKind.REDACT -> Icons.Default.VisibilityOff
                             }, contentDescription = label, modifier = Modifier.size(18.dp))
                             else Text(label, style = MaterialTheme.typography.labelSmall)
-                        }
+                        })
                     }
                 }
-                if (!imeVisible) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!compactEditor) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = selectionMode, onClick = { selectionMode = !selectionMode; selectedEdit = -1 }, label = { Text("Seleccionar cambios") })
                     if (selectedEdit in edits.indices) {
                         TextButton(onClick = {
@@ -839,7 +858,7 @@ private fun BatchEditor(
                 if (mode == PdfOperations.EditKind.TEXT) {
                     OutlinedTextField(textToAdd, { textToAdd = it.take(1000) }, label = { Text("Texto a colocar") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                         textStyle = if (imeVisible) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge)
-                    if (!imeVisible) Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (!compactEditor) Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${fontSize.toInt()} pt", modifier = Modifier.width(58.dp))
                         Slider(fontSize, { fontSize = it }, valueRange = 6f..72f, modifier = Modifier.weight(1f))
                     }
@@ -857,7 +876,7 @@ private fun BatchEditor(
                     Button(onClick = ::addToSession, enabled = selectionReady && (mode != PdfOperations.EditKind.TEXT || textToAdd.isNotBlank()) && (mode != PdfOperations.EditKind.IMAGE || imageToAdd != null), modifier = Modifier.weight(1f)) { Text("Aplicar cambio") }
                 }
                 val latest = edits.lastOrNull()
-                if (!imeVisible && latest != null && latest.pageIndex == page) {
+                if (!compactEditor && latest != null && latest.pageIndex == page) {
                     TextButton(onClick = {
                         val edit = edits.last()
                         history = history.remove(edits.lastIndex)
@@ -874,7 +893,7 @@ private fun BatchEditor(
                         }
                     }, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)) { Text("Reeditar último cambio de esta página") }
                 }
-                if (!imeVisible) Text(when (mode) {
+                if (!compactEditor) Text(when (mode) {
                     PdfOperations.EditKind.TEXT -> "El texto se previsualiza en vivo. Tocá la página para reubicarlo."
                     PdfOperations.EditKind.IMAGE -> "Tocá o arrastrá la imagen para ubicarla y pulsá Aplicar cambio."
                     else -> "Arrastrá para seleccionar la zona y pulsá Aplicar cambio."
@@ -1445,10 +1464,11 @@ private fun HomeScreen(
     isDarkMode: Boolean, onToggleTheme: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val landscape = LocalConfiguration.current.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
     LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
-            Box(Modifier.fillMaxWidth().height(132.dp).background(MaterialTheme.colorScheme.primary)) {
-                Column(Modifier.padding(20.dp)) {
+            Box(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.primary)) {
+                Column(Modifier.padding(horizontal = 20.dp, vertical = if (landscape) 8.dp else 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Description, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(30.dp))
                         Spacer(Modifier.width(8.dp))
@@ -1458,9 +1478,6 @@ private fun HomeScreen(
                                 if (isDarkMode) "Activar tema claro" else "Activar tema oscuro", tint = MaterialTheme.colorScheme.onPrimary)
                         }
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Text("Tus documentos, a tu manera.", color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Todo lo que necesitás, sin conexión.", color = MaterialTheme.colorScheme.onPrimary.copy(alpha = .9f))
                 }
             }
         }
@@ -1541,10 +1558,12 @@ private fun ToolCard(name: String, icon: androidx.compose.ui.graphics.vector.Ima
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(containerColor = if (dark) MaterialTheme.colorScheme.surfaceVariant else color,
             contentColor = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C))) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 18.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+    Box(Modifier.fillMaxSize().defaultMinSize(minHeight = 112.dp), contentAlignment = Alignment.Center) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 12.dp, horizontal = 6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Icon(icon, null, tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline, modifier = Modifier.size(28.dp))
         Spacer(Modifier.height(8.dp))
         Text(name, style = MaterialTheme.typography.labelMedium, color = if (dark) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF182F3C), textAlign = androidx.compose.ui.text.style.TextAlign.Center, maxLines = 2)
+    }
     }
     }
 }
@@ -1677,6 +1696,17 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
     var jumpDialog by remember { mutableStateOf(false) }
     var jumpText by remember { mutableStateOf("") }
     var showAbout by remember { mutableStateOf(false) }
+    var fullscreen by rememberSaveable(uri) { mutableStateOf(false) }
+    val window = (context as? ComponentActivity)?.window
+    DisposableEffect(fullscreen, window) {
+        val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        if (fullscreen) {
+            controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else controller?.show(WindowInsetsCompat.Type.systemBars())
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
+    BackHandler(fullscreen) { fullscreen = false }
     LaunchedEffect(uri, page, retry) {
         image = null
         zoom = 1f
@@ -1685,10 +1715,13 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
         catch (e: Exception) { renderError = e.message ?: "Archivo incompatible" }
     }
     Column(Modifier.fillMaxSize()) {
+        if (!fullscreen) {
         Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
             Text(fileNameFor(context, uri), modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             IconButton(onClick = onSearch, enabled = !busy) { Icon(Icons.Default.Search, "Buscar texto") }
+            IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "Ver PDF en pantalla completa") }
+        }
         }
         Box(Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Color(0xFFE9E8F1)), contentAlignment = Alignment.Center) {
             val bitmap = image
@@ -1713,7 +1746,12 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                     }
                 }.graphicsLayer(scaleX = zoom, scaleY = zoom, translationX = pan.x, translationY = pan.y),
                 contentScale = ContentScale.Fit)
+            if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd)
+                .padding(8.dp).background(MaterialTheme.colorScheme.surface.copy(alpha = .85f), RoundedCornerShape(12.dp))) {
+                Icon(Icons.Default.FullscreenExit, "Salir de pantalla completa")
+            }
         }
+        if (!fullscreen) {
         Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { onPage(page - 1) }, enabled = page > 0) { Icon(Icons.Default.ChevronLeft, "Anterior") }
             TextButton(onClick = { jumpText = (page + 1).toString(); jumpDialog = true }) { Text("${page + 1} / $count") }
@@ -1738,6 +1776,7 @@ private fun ViewerScreen(uri: Uri, page: Int, count: Int, busy: Boolean, onBack:
                     }
                 }
             }
+        }
         }
     }
     if (jumpDialog) AlertDialog(onDismissRequest = { jumpDialog = false }, title = { Text("Ir a la página") },
