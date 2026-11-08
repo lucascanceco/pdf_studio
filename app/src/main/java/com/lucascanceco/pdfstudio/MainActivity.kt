@@ -20,7 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.ExperimentalLayoutApi
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -651,7 +651,6 @@ private fun PdfStudioApp(initialUri: Uri?) {
 
 /** Non-destructive edit session. All positions are page-relative, not screen-relative. */
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
 private fun BatchEditor(
     uri: Uri,
     initialPage: Int,
